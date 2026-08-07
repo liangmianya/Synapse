@@ -1,0 +1,82 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="theme-color" content="#fafaf9" />
+    <title>Synapse | 非线性学习伴侣</title>
+    <link rel="stylesheet" href="/styles.css?v=20260807-ui13" />
+  </head>
+  <body>
+    <main class="app-shell">
+      <header class="topbar">
+        <div class="brand-lockup">
+          <div class="brand-mark" aria-hidden="true"><i data-lucide="workflow"></i></div>
+          <p class="brand-name">Synapse</p>
+        </div>
+        <div class="topbar-actions">
+          <button class="icon-button" data-action="command" aria-label="搜索或执行命令" title="搜索或执行命令"><i data-lucide="search"></i></button>
+          <div class="mode-switcher" role="tablist" aria-label="工作视图">
+            <button class="mode-button active" data-mode="canvas" role="tab" aria-label="画布模式" aria-selected="true" title="画布模式"><i data-lucide="panels-top-left"></i></button>
+            <button class="mode-button" data-mode="thread" role="tab" aria-label="线索模式" aria-selected="false" title="线索模式"><i data-lucide="message-square-text"></i></button>
+            <button class="mode-button" data-mode="compare" role="tab" aria-label="对比模式" aria-selected="false" title="对比模式"><i data-lucide="columns-2"></i></button>
+          </div>
+          <button class="icon-button" data-action="settings" aria-label="模型服务设置" title="模型服务设置"><i data-lucide="settings-2"></i></button>
+          <button class="icon-button" data-action="export" aria-label="导出为 Markdown" title="导出为 Markdown"><i data-lucide="download"></i></button>
+        </div>
+      </header>
+
+      <aside class="sidebar">
+        <button class="new-thread-button" data-action="new-thread"><i data-lucide="plus"></i><span>新建线索</span><kbd>Ctrl N</kbd></button>
+        <button class="new-canvas-button" data-action="new-workspace"><i data-lucide="panels-top-left"></i><span>新建画布</span></button>
+        <label class="workspace-picker"><span>当前画布</span><select id="workspace-selector" aria-label="切换画布"></select></label>
+        <nav aria-label="工作台导航">
+          <button class="nav-item active" data-action="show-canvas"><i data-lucide="layout-dashboard"></i><span>学习画布</span><span class="nav-count" id="thread-count">4</span></button>
+        </nav>
+        <section class="thread-tree" aria-label="线索树">
+          <div class="section-heading"><p class="nav-label">线索</p><div id="sidebar-bulk-actions"></div></div>
+          <div id="thread-list"></div>
+        </section>
+      </aside>
+
+      <section class="main-stage">
+        <section class="canvas-view view active" id="canvas-view" aria-label="学习画布">
+          <div class="canvas-toolbar">
+            <div class="canvas-bulk-actions" id="canvas-bulk-actions"></div>
+            <div class="canvas-tools">
+              <button class="tool-button" data-action="auto-layout" aria-label="自动整理" title="自动整理"><i data-lucide="wand-sparkles"></i></button>
+              <div class="zoom-controls"><button class="icon-button small" data-action="zoom-out" aria-label="缩小" title="缩小"><i data-lucide="minus"></i></button><span id="zoom-label">100%</span><button class="icon-button small" data-action="zoom-in" aria-label="放大" title="放大"><i data-lucide="plus"></i></button></div>
+            </div>
+          </div>
+          <div class="canvas-viewport" id="canvas-viewport">
+            <div class="canvas-grid" id="canvas-grid">
+              <svg class="connectors" id="connectors" aria-hidden="true"></svg>
+              <div id="cards-layer"></div>
+            </div>
+          </div>
+        </section>
+
+        <section class="thread-view view" id="thread-view" aria-label="线索详情">
+          <div id="thread-detail"></div>
+        </section>
+
+        <section class="compare-view view" id="compare-view" aria-label="线索对比">
+          <div class="compare-header"><h1>线索对比</h1><div class="compare-header-actions"><label class="sync-toggle"><input type="checkbox" id="sync-scroll" /><span></span>同步滚动</label></div></div>
+          <div class="compare-empty" id="compare-empty"><i data-lucide="columns-2"></i><h2>选择两条线索开始对比</h2><button class="button primary" data-action="show-canvas"><i data-lucide="arrow-left"></i>返回画布</button></div>
+          <div class="compare-columns" id="compare-columns"></div>
+        </section>
+      </section>
+
+      <footer class="statusbar"><span class="status-save"><i data-lucide="circle-check"></i>已保存</span><span class="status-model"><i data-lucide="bot"></i><span id="status-model-name">Synapse Demo</span></span></footer>
+    </main>
+
+    <aside id="branch-drawer" class="branch-drawer" aria-label="创建分支" aria-hidden="true"><form id="branch-form"><div class="drawer-head"><div><p class="eyebrow" id="branch-drawer-eyebrow">创建分支</p><h2 id="branch-dialog-title">从当前想法延伸</h2></div><button class="icon-button" type="button" data-action="close-branch" aria-label="关闭" title="关闭"><i data-lucide="x"></i></button></div><section class="branch-source" id="branch-source" aria-label="分支来源"><p class="source-label">从这里继续</p><div id="branch-context" class="branch-context"></div></section><label><span id="branch-prompt-label">新的问题</span><textarea id="branch-prompt" rows="3" placeholder="例如：为什么归并排序是稳定的？"></textarea></label><div class="dialog-actions"><button class="button secondary" type="button" data-action="close-branch">取消</button><button class="button primary" type="submit" id="create-branch"><i data-lucide="git-branch"></i>创建分支</button></div></form></aside>
+    <dialog id="delete-dialog" class="dialog delete-dialog"><form id="delete-form"><div class="dialog-head"><div><p class="eyebrow">删除线索</p><h2 id="delete-dialog-title">删除此线索？</h2></div><button class="icon-button" type="button" data-action="close-delete" aria-label="关闭" title="关闭"><i data-lucide="x"></i></button></div><p class="dialog-copy" id="delete-dialog-copy"></p><div class="dialog-actions"><button class="button secondary" type="button" data-action="close-delete">取消</button><button class="button danger" type="submit"><i data-lucide="trash-2"></i>删除</button></div></form></dialog>
+    <dialog id="command-dialog" class="command-dialog"><form method="dialog"><div class="command-input"><i data-lucide="search"></i><input id="command-search" placeholder="搜索线索" autocomplete="off" /></div><div class="command-results" id="command-results"></div></form></dialog>
+    <dialog id="settings-dialog" class="settings-dialog"><form id="settings-form"><div class="dialog-head"><div><p class="eyebrow">模型服务</p><h2>连接 AI 模型</h2></div><button class="icon-button" type="button" data-action="close-settings" aria-label="关闭"><i data-lucide="x"></i></button></div><div class="settings-fields"><label>服务类型<select id="provider-input" name="provider"><option value="demo">Synapse 演示回复</option><option value="openai-compatible">OpenAI 兼容接口</option></select></label><div class="provider-setting" id="provider-setting"><label>接口地址<input id="base-url-input" name="baseUrl" type="url" placeholder="https://api.openai.com/v1" autocomplete="url" /></label><label>API Key<input id="api-key-input" name="apiKey" type="password" placeholder="输入后仅保存在本机后端" autocomplete="off" /></label><label>模型名称<input id="model-input" name="model" type="text" placeholder="例如：gpt-4o-mini" autocomplete="off" /></label></div><label>系统提示词<textarea id="system-prompt-input" name="systemPrompt" rows="4" placeholder="定义 AI 的角色、语言和回答风格"></textarea></label><div class="settings-status" id="settings-status"><i data-lucide="shield-check"></i><span>密钥不会返回到浏览器</span></div></div><div class="dialog-actions"><button class="button secondary" id="test-settings" type="button"><i data-lucide="plug-zap"></i>测试连接</button><button class="button primary" type="submit"><i data-lucide="save"></i>保存设置</button></div></form></dialog>
+    <dialog id="workspace-dialog" class="dialog"><form id="workspace-form"><div class="dialog-head"><div><p class="eyebrow">新建画布</p><h2>创建学习画布</h2></div><button class="icon-button" type="button" data-action="close-workspace" aria-label="关闭" title="关闭"><i data-lucide="x"></i></button></div><label>画布名称<input id="workspace-title-input" maxlength="80" placeholder="例如：数据结构复习" autocomplete="off" /></label><div class="dialog-actions"><button class="button secondary" type="button" data-action="close-workspace">取消</button><button class="button primary" type="submit"><i data-lucide="plus"></i>创建画布</button></div></form></dialog>
+    <div class="toast" id="toast" role="status"></div>
+    <script src="https://unpkg.com/lucide@0.468.0/dist/umd/lucide.min.js"></script>
+    <script type="module" src="/app.js"></script>
+  </body>
+</html>
