@@ -4,9 +4,9 @@ import DOMPurify from 'dompurify';
 marked.use({ breaks: true, gfm: true });
 
 const state = {
-  mode: 'canvas', workspaceId: 'default', workspaceTitle: '算法复习工作台', activeId: 'quick', selected: new Set(), scale: 1, pan: { x: 0, y: 0 }, backendAvailable: false, branchTargetId: null, branchMessageId: null, deleteTargetIds: [],
+  mode: 'canvas', workspaceId: 'default', workspaceTitle: '算法复习工作台', activeId: 'quick', selected: new Set(), links: [], scale: 1, pan: { x: 0, y: 0 }, backendAvailable: false, branchTargetId: null, branchMessageId: null, quickBranchTargetId: null, quickReplyTargetId: null, branchType: null, deleteTargetIds: [],
   threads: [
-    { id:'quick', title:'快速排序', topic:'#0d9488', model:'GPT-4o', count:6, updated:'刚刚', parent:null, x:100, y:205, focused:true, pinned:true, preview:'理解分区过程，以及它为什么在平均情况下很快。', messages:[
+    { id:'quick', title:'快速排序', topic:'#0d9488', model:'GPT-4o', count:6, updated:'刚刚', parent:null, x:100, y:205, pinned:true, preview:'理解分区过程，以及它为什么在平均情况下很快。', messages:[
       { role:'user', text:'解释快速排序的核心思想，并用一个数组例子说明。' },
       { role:'assistant', text:'快速排序通过 **分治** 工作：选择一个基准值，将小于它的元素移到左侧，大于它的移到右侧，再递归处理两个子数组。\n\n例如对 `[6, 3, 8, 2, 5]` 选择 5 为基准，分区后得到 `[3, 2] 5 [6, 8]`。此时 5 已在最终位置。' },
       { role:'user', text:'为什么它的平均时间复杂度是 O(n log n)？' },
@@ -30,13 +30,38 @@ const state = {
   ]
 };
 
+const BRANCH_TYPES = ['深入解释', '反例', '应用场景', '代码实现', '换个角度', '质疑结论'];
+
 const $ = (selector, root=document) => root.querySelector(selector);
 const $$ = (selector, root=document) => [...root.querySelectorAll(selector)];
 const getThread = id => state.threads.find(t => t.id === id);
 const renderMarkdown = value => `<div class="markdown-body">${DOMPurify.sanitize(marked.parse(String(value || '')))}</div>`;
 const escapeHtml = value => String(value || '').replace(/[&<>"']/g, character => ({ '&':'&amp;', '<':'&lt;', '>':'&gt;', '"':'&quot;', "'":'&#39;' }[character]));
+const activeBranchType = () => BRANCH_TYPES.includes(state.branchType) ? state.branchType : null;
 
 function initIcons() { if (window.lucide) lucide.createIcons({attrs:{'stroke-width':1.6}}); }
+function branchTypeControls() {
+  const current=activeBranchType();
+  return `<div class="branch-type-row" role="group" aria-label="分支类型">${BRANCH_TYPES.map(type=>`<button type="button" class="branch-type ${type===current ? 'active' : ''}" data-action="set-branch-type" data-branch-type="${escapeHtml(type)}">${escapeHtml(type)}</button>`).join('')}</div>`;
+}
+function threadPath(thread) {
+  const path=[]; let cursor=thread; const seen=new Set();
+  while (cursor && !seen.has(cursor.id)) { path.unshift(cursor); seen.add(cursor.id); cursor=cursor.parent ? getThread(cursor.parent) : null; }
+  return path;
+}
+function renderCardPath(thread) {
+  const path=threadPath(thread);
+  if (path.length < 2) return `<div class="card-path"><span>主线索</span></div>`;
+  return `<div class="card-path">${path.map((item,index)=>`<span>${escapeHtml(item.title)}</span>${index<path.length-1 ? '<i data-lucide="chevron-right"></i>' : ''}`).join('')}</div>`;
+}
+function branchPrompt(type, prompt) {
+  const value=String(prompt || '').trim();
+  return type ? `【${type}】${value}` : value;
+}
+function titleFromPrompt(value) {
+  const normalized=String(value || '').replace(/^【(.+?)】/, '$1：').trim();
+  return normalized.length>18 ? normalized.slice(0,18)+'…' : normalized;
+}
 function formatMessage(message, compact=false, threadId=state.activeId) {
   const label = message.role === 'user' ? '你' : 'Synapse';
   if (compact) return `<div class="compact-message ${message.role}"><strong>${label}</strong>${message.streaming ? '<span class="typing">正在思考</span>' : renderMarkdown(message.text)}</div>`;
@@ -46,7 +71,24 @@ function formatMessage(message, compact=false, threadId=state.activeId) {
 function toClientThread(thread) {
   const messages = (thread.messages || []).map(message => ({ id: message.id, role: message.role, text: message.content, createdAt: message.createdAt }));
   const last = messages.at(-1);
-  return { id:thread.id, title:thread.title, topic:thread.topic, model:thread.model, count:thread.messageCount ?? messages.length, updated:'刚刚', parent:thread.parentThreadId, parentMessageId:thread.parentMessageId, x:thread.position?.x ?? 100, y:thread.position?.y ?? 100, focused:false, pinned:Boolean(thread.pinned), preview:last?.text || '开始这个学习线索', messages };
+  return { id:thread.id, title:thread.title, topic:thread.topic, model:thread.model, count:thread.messageCount ?? messages.length, updated:'刚刚', parent:thread.parentThreadId, parentMessageId:thread.parentMessageId, x:thread.position?.x ?? 100, y:thread.position?.y ?? 100, pinned:Boolean(thread.pinned), preview:last?.text || '开始这个学习线索', messages };
+}
+function toClientLink(link) {
+  return { id:link.id, source:link.sourceThreadId, target:link.targetThreadId, label:link.label || '', type:link.type || 'semantic' };
+}
+function inferredSynthesisLinks(threads, existingLinks=[]) {
+  const existingKeys=new Set(existingLinks.map(link=>`${link.source}->${link.target}`));
+  const byTitle=new Map();
+  threads.forEach(thread => {
+    if (!byTitle.has(thread.title)) byTitle.set(thread.title, []);
+    byTitle.get(thread.title).push(thread);
+  });
+  return threads.flatMap(target => {
+    const prompt=target.messages.find(message=>message.role==='user')?.text || '';
+    if (!target.title.startsWith('综合：') || !prompt.includes('## 来源')) return [];
+    const sourceTitles=[...prompt.matchAll(/^## 来源 \d+：(.+)$/gm)].map(match=>match[1].trim()).filter(Boolean);
+    return sourceTitles.flatMap(title => (byTitle.get(title) || []).filter(source=>source.id!==target.id).map(source=>({ source, title }))).filter(({source})=>!existingKeys.has(`${source.id}->${target.id}`)).map(({source},index)=>({ id:`inferred-synthesis-${source.id}-${target.id}-${index}`, source:source.id, target:target.id, label:'综合', type:'synthesis' }));
+  });
 }
 async function api(path, options={}) {
   const response = await fetch(path, { ...options, headers: { 'Content-Type':'application/json', ...(options.headers || {}) } });
@@ -60,6 +102,8 @@ async function bootstrap(workspaceId=state.workspaceId) {
     state.workspaceId=payload.workspace.id;
     state.workspaceTitle=payload.workspace.title;
     state.threads = payload.threads.map(toClientThread);
+    state.links = (payload.links || []).map(toClientLink);
+    state.links.push(...inferredSynthesisLinks(state.threads, state.links));
     state.activeId=state.threads[0]?.id || null;
     state.backendAvailable = true;
     const heap = state.threads.find(thread => thread.id === 'heap');
@@ -98,12 +142,24 @@ async function renderWorkspacePicker() {
 }
 function renderCards() {
   const layer = $('#cards-layer');
-  layer.innerHTML = state.threads.map(thread => `<article class="thread-card ${thread.focused ? 'focused' : ''} ${state.selected.has(thread.id) ? 'selected' : ''}" data-card="${thread.id}" style="left:${thread.x}px;top:${thread.y}px"><div class="card-top"><span class="topic-dot" style="background:${thread.topic}"></span><span class="card-title">${thread.title}</span><button class="card-select" data-select="${thread.id}" aria-label="${state.selected.has(thread.id) ? '取消选择' : '选择'} ${thread.title}" title="${state.selected.has(thread.id) ? '取消选择' : '选择'}"><i data-lucide="${state.selected.has(thread.id) ? 'check' : 'circle'}"></i></button><button class="icon-button small collapse-card" data-action="toggle-card" data-thread="${thread.id}" aria-label="${thread.focused ? '折叠' : '展开'}线索" title="${thread.focused ? '折叠' : '展开'}"><i data-lucide="${thread.focused ? 'chevron-up' : 'chevron-down'}"></i></button></div><div class="card-preview" data-card-preview>${renderMarkdown(thread.preview)}</div><div class="card-footer"><span>${thread.model}</span><span></span><span data-card-count>${thread.count} 条消息</span><span></span><span>${thread.updated}</span></div><div class="card-conversation">${thread.messages.slice(-3).map(message => formatMessage(message,true)).join('')}</div><div class="thread-card-actions"><button class="card-action" data-action="open-thread" data-thread="${thread.id}"><i data-lucide="maximize-2"></i>打开</button><button class="card-action" data-action="branch" data-thread="${thread.id}"><i data-lucide="git-branch"></i>分支</button><button class="card-action danger-action" data-action="request-delete" data-thread="${thread.id}"><i data-lucide="trash-2"></i>删除</button></div></article>`).join('');
+  const scrollPositions = new Map($$('.thread-card', layer).map(card => [card.dataset.card, $('.card-conversation', card)?.scrollTop || 0]));
+  layer.innerHTML = state.threads.map(thread => {
+    const title=escapeHtml(thread.title);
+    const quickBranch = state.quickBranchTargetId === thread.id ? `<form class="quick-branch" data-quick-branch="${thread.id}">${branchTypeControls()}<textarea rows="2" placeholder="新的问题..." aria-label="从「${title}」创建分支"></textarea><div><button type="button" data-action="close-quick-branch" aria-label="取消" title="取消"><i data-lucide="x"></i></button><button type="submit" aria-label="创建分支" title="创建分支"><i data-lucide="arrow-up"></i></button></div></form>` : '';
+    const quickReply = state.quickReplyTargetId === thread.id ? `<form class="quick-reply" data-quick-reply="${thread.id}"><textarea rows="2" placeholder="继续追问当前线索..." aria-label="继续追问「${title}」"></textarea><button type="button" data-action="close-quick-reply" aria-label="取消" title="取消"><i data-lucide="x"></i></button><button type="submit" aria-label="发送" title="发送"><i data-lucide="arrow-up"></i></button></form>` : '';
+    return `<article class="thread-card ${state.activeId === thread.id ? 'active' : ''} ${state.selected.has(thread.id) ? 'selected' : ''}" data-card="${thread.id}" style="left:${thread.x}px;top:${thread.y}px"><button class="branch-node" data-action="quick-branch" data-thread="${thread.id}" aria-label="从「${title}」创建分支" title="创建分支"><i data-lucide="plus"></i></button>${quickBranch}${renderCardPath(thread)}<div class="card-top"><span class="topic-dot" style="background:${thread.topic}"></span><span class="card-title">${title}</span><button class="card-select" data-select="${thread.id}" aria-label="${state.selected.has(thread.id) ? '取消选择' : '选择'} ${title}" title="${state.selected.has(thread.id) ? '取消选择' : '选择'}"><i data-lucide="${state.selected.has(thread.id) ? 'check' : 'circle'}"></i></button></div><div class="card-conversation">${thread.messages.slice(-3).map(message => formatMessage(message,true)).join('')}</div>${quickReply}<div class="thread-card-actions"><button class="card-action" data-action="open-thread" data-thread="${thread.id}"><i data-lucide="maximize-2"></i>打开</button><button class="card-action danger-action" data-action="request-delete" data-thread="${thread.id}"><i data-lucide="trash-2"></i>删除</button></div></article>`;
+  }).join('');
+  $$('.thread-card', layer).forEach(card => {
+    const conversation = $('.card-conversation', card);
+    if (conversation && scrollPositions.has(card.dataset.card)) conversation.scrollTop = scrollPositions.get(card.dataset.card);
+  });
   renderConnectors();
+  const quickInput=$('.quick-branch textarea, .quick-reply textarea');
+  if (quickInput) setTimeout(()=>quickInput.focus(),0);
 }
 function renderedCardBounds(thread) {
   const card=$(`[data-card="${thread.id}"]`);
-  return { x:thread.x, y:thread.y, width:card?.offsetWidth || (thread.focused ? 400 : 310), height:card?.offsetHeight || (thread.focused ? 340 : 172) };
+  return { x:thread.x, y:thread.y, width:card?.offsetWidth || 400, height:card?.offsetHeight || 340 };
 }
 function smoothConnectorPath(fromThread, toThread) {
   const from=renderedCardBounds(fromThread);
@@ -121,13 +177,17 @@ function smoothConnectorPath(fromThread, toThread) {
 }
 function renderConnectors() {
   const svg = $('#connectors');
-  const links = state.threads.filter(t => t.parent).map(thread => {
+  const parentLinks = state.threads.filter(t => t.parent).map(thread => {
     const parent = getThread(thread.parent); if (!parent) return '';
     return `<path class="connector ${thread.id === state.activeId ? 'active' : ''}" data-connector-thread="${thread.id}" d="${smoothConnectorPath(parent,thread)}" />`;
   }).join('');
-  const quick = getThread('quick'), merge = getThread('merge');
-  const semantic = quick && merge ? `<path class="connector-link" data-semantic-link d="${smoothConnectorPath(quick,merge)}" />` : '';
-  svg.innerHTML = links + semantic;
+  const semanticLinks = state.links.map(link => {
+    const source=getThread(link.source), target=getThread(link.target);
+    if (!source || !target) return '';
+    const active=link.source===state.activeId || link.target===state.activeId ? 'active' : '';
+    return `<path class="connector-link ${link.type === 'synthesis' ? 'synthesis-link' : ''} ${active}" data-link="${link.id}" data-link-source="${link.source}" data-link-target="${link.target}" d="${smoothConnectorPath(source,target)}" />`;
+  }).join('');
+  svg.innerHTML = parentLinks + semanticLinks;
 }
 function refreshConnector(thread) {
   if (!thread?.parent) return;
@@ -139,10 +199,10 @@ function refreshConnectorsForThread(threadId) {
   const thread=getThread(threadId);
   refreshConnector(thread);
   state.threads.filter(item=>item.parent===threadId).forEach(refreshConnector);
-  if (threadId==='quick' || threadId==='merge') {
-    const quick=getThread('quick'), merge=getThread('merge'), semantic=$('[data-semantic-link]');
-    if (quick && merge && semantic) semantic.setAttribute('d',smoothConnectorPath(quick,merge));
-  }
+  $$(`[data-link-source="${threadId}"], [data-link-target="${threadId}"]`).forEach(path => {
+    const source=getThread(path.dataset.linkSource), target=getThread(path.dataset.linkTarget);
+    if (source && target) path.setAttribute('d', smoothConnectorPath(source,target));
+  });
 }
 function renderDetail() {
   const thread = getThread(state.activeId) || state.threads[0];
@@ -156,11 +216,21 @@ function renderCompare() {
 }
 function renderBulkActions() {
   const count=state.selected.size;
-  $('#canvas-bulk-actions').innerHTML=count ? `<button class="tool-button danger-tool" data-action="request-bulk-delete" aria-label="删除已选线索" title="删除已选线索"><i data-lucide="trash-2"></i><span>${count}</span></button>` : '';
+  $('#canvas-bulk-actions').innerHTML=count ? `${count>=2 ? `<button class="tool-button" data-action="synthesize-selected" aria-label="生成综合卡片" title="生成综合卡片"><i data-lucide="git-merge"></i><span>${Math.min(count,3)}</span></button>` : ''}<button class="tool-button danger-tool" data-action="request-bulk-delete" aria-label="删除已选线索" title="删除已选线索"><i data-lucide="trash-2"></i><span>${count}</span></button>` : '';
   const sidebarActions=$('#sidebar-bulk-actions');
-  if (sidebarActions) sidebarActions.innerHTML=count ? `<button class="icon-button small detail-delete" data-action="request-bulk-delete" aria-label="删除已选线索" title="删除已选线索"><i data-lucide="trash-2"></i></button>` : '';
+  if (sidebarActions) sidebarActions.innerHTML=count ? `${count>=2 ? `<button class="icon-button small" data-action="synthesize-selected" aria-label="生成综合卡片" title="生成综合卡片"><i data-lucide="git-merge"></i></button>` : ''}<button class="icon-button small detail-delete" data-action="request-bulk-delete" aria-label="删除已选线索" title="删除已选线索"><i data-lucide="trash-2"></i></button>` : '';
 }
 function renderAll() { renderTree(); renderCards(); renderDetail(); renderCompare(); renderBulkActions(); initIcons(); applyCanvasTransform(); }
+function renderActiveState() {
+  $$('.thread-card').forEach(card => card.classList.toggle('active', card.dataset.card === state.activeId));
+  $$('#thread-list .tree-item').forEach(item => {
+    const threadId=$('[data-thread]', item)?.dataset.thread;
+    item.classList.toggle('selected', threadId === state.activeId);
+  });
+  $$('[data-connector-thread]').forEach(path => path.classList.toggle('active', path.dataset.connectorThread === state.activeId));
+  $$('[data-link]').forEach(path => path.classList.toggle('active', path.dataset.linkSource === state.activeId || path.dataset.linkTarget === state.activeId));
+  if (state.mode === 'thread') { renderDetail(); initIcons(); }
+}
 function applyCanvasTransform() {
   const viewport=$('#canvas-viewport');
   viewport.style.setProperty('--grid-size', `${24 * state.scale}px`);
@@ -185,8 +255,53 @@ function zoomCanvas(nextScale, clientX, clientY) {
 }
 function setMode(mode) { state.mode = mode; $$('.view').forEach(v=>v.classList.remove('active')); $(`#${mode}-view`).classList.add('active'); $$('.mode-button').forEach(btn=>{const yes=btn.dataset.mode===mode;btn.classList.toggle('active',yes);btn.setAttribute('aria-selected',yes);}); if (mode==='compare') renderCompare(); if (mode==='thread') renderDetail(); }
 function toast(message) { const element=$('#toast'); element.textContent=message;element.classList.add('show');clearTimeout(toast.timer);toast.timer=setTimeout(()=>element.classList.remove('show'),2100); }
-function updateFocus(id) { state.threads.forEach(thread=>thread.focused=thread.id===id); state.activeId=id; }
-function cardFootprint(thread) { return { x:thread.x, y:thread.y, width:thread.focused ? 400 : 310, height:thread.focused ? 340 : 172 }; }
+function updateFocus(id) { const thread=getThread(id); if (!thread) return; state.activeId=id; }
+function cardFootprint(thread) { return { x:thread.x, y:thread.y, width:400, height:340 }; }
+function isTextInputTarget(target) { return Boolean(target?.closest?.('input, textarea, select, [contenteditable="true"]')); }
+function openQuickBranch(threadId=state.activeId) {
+  const thread=getThread(threadId) || state.threads[0];
+  if (!thread) return;
+  state.activeId=thread.id;
+  state.quickBranchTargetId=thread.id;
+  state.quickReplyTargetId=null;
+  renderAll();
+}
+function closeQuickBranch() {
+  state.quickBranchTargetId=null;
+  renderAll();
+}
+function openQuickReply(threadId=state.activeId) {
+  const thread=getThread(threadId) || state.threads[0];
+  if (!thread) return;
+  state.activeId=thread.id;
+  state.quickReplyTargetId=thread.id;
+  state.quickBranchTargetId=null;
+  renderAll();
+}
+function closeQuickReply() {
+  state.quickReplyTargetId=null;
+  renderAll();
+}
+function setBranchType(type) {
+  if (!BRANCH_TYPES.includes(type)) return;
+  state.branchType=state.branchType === type ? null : type;
+  $$('.branch-type').forEach(button => button.classList.toggle('active', button.dataset.branchType === state.branchType));
+}
+function directionalThread(direction) {
+  const current=getThread(state.activeId) || state.threads[0];
+  if (!current) return null;
+  const currentBounds=renderedCardBounds(current);
+  const origin={x:currentBounds.x+currentBounds.width/2,y:currentBounds.y+currentBounds.height/2};
+  const candidates=state.threads.filter(thread=>thread.id!==current.id).map(thread=>{
+    const bounds=renderedCardBounds(thread);
+    const center={x:bounds.x+bounds.width/2,y:bounds.y+bounds.height/2};
+    const dx=center.x-origin.x, dy=center.y-origin.y;
+    const primary=direction==='left' ? -dx : direction==='right' ? dx : direction==='up' ? -dy : dy;
+    const cross=direction==='left' || direction==='right' ? Math.abs(dy) : Math.abs(dx);
+    return {thread,primary,cross,score:primary+cross*1.35};
+  }).filter(item=>item.primary>12);
+  return candidates.sort((a,b)=>a.score-b.score || a.cross-b.cross)[0]?.thread || null;
+}
 function overlaps(a,b,padding=26) { return a.x < b.x+b.width+padding && a.x+a.width+padding > b.x && a.y < b.y+b.height+padding && a.y+a.height+padding > b.y; }
 function findOpenPosition(preferred) {
   const footprint={x:preferred.x,y:preferred.y,width:400,height:340};
@@ -204,23 +319,23 @@ function findOpenPosition(preferred) {
   }
   return {x:preferred.x+365,y:preferred.y+230};
 }
-async function createThread(prompt, parent=null, sendInitial=false, parentMessageId=null, placement='branch') {
+async function createThread(prompt, parent=null, sendInitial=false, parentMessageId=null, placement='branch', options={}) {
   const question=String(prompt || '').trim();
   if (!question) return null;
-  const n=state.threads.length+1; const parentThread=parent ? getThread(parent) : null; const title=question.length>18 ? question.slice(0,18)+'…' : question;
+  const n=state.threads.length+1; const parentThread=parent ? getThread(parent) : null; const title=options.title || titleFromPrompt(question);
   const preferred=parentThread ? {x:parentThread.x+455,y:parentThread.y+(placement==='continuation'?0:205)} : {x:100+(n%3)*365,y:90+Math.floor(n/3)*230};
-  const position=findOpenPosition(preferred);
+  const position=options.position || findOpenPosition(preferred);
   if (state.backendAvailable) {
     try {
       const endpoint = parent ? `/api/threads/${parent}/branches` : '/api/threads';
-      const body = parent ? { title, position, parentMessageId:parentMessageId || parentThread.messages.at(-1)?.id } : { title, position, workspaceId:state.workspaceId };
+      const body = parent ? { title, position, topic:options.topic, parentMessageId:parentMessageId || parentThread.messages.at(-1)?.id } : { title, position, topic:options.topic, workspaceId:state.workspaceId };
       const response = await api(endpoint, { method:'POST', body:JSON.stringify(body) });
       const thread = toClientThread(await response.json()); state.threads.push(thread); updateFocus(thread.id); state.selected.clear(); state.selected.add(thread.id); renderAll(); toast(parent ? '已从当前线索创建分支' : '已创建新的学习线索');
       if (sendInitial) void sendMessageToThread(thread.id, question);
       return thread;
     } catch (error) { toast(error.message || '创建线索失败'); return null; }
   }
-  const id=`thread-${Date.now()}`; const thread={id,title,topic:['#6d28d9','#059669','#c2410c','#a21caf'][n%4],model:'Synapse Demo',count:0,updated:'刚刚',parent,x:position.x,y:position.y,focused:true,preview:question,messages:[]}; state.threads.push(thread); updateFocus(id);state.selected.clear();state.selected.add(id);renderAll();if(sendInitial) void sendMessageToThread(id,question);return thread;
+  const id=`thread-${Date.now()}`; const thread={id,title,topic:options.topic || ['#6d28d9','#059669','#c2410c','#a21caf'][n%4],model:'Synapse Demo',count:0,updated:'刚刚',parent,x:position.x,y:position.y,preview:question,messages:[]}; state.threads.push(thread); updateFocus(id);state.selected.clear();state.selected.add(id);renderAll();if(sendInitial) void sendMessageToThread(id,question);return thread;
 }
 function branch(threadId, messageId=null) {
   const thread=getThread(threadId); if (!thread) return;
@@ -230,6 +345,7 @@ function branch(threadId, messageId=null) {
   $('#branch-prompt-label').textContent='新的问题';
   $('#branch-prompt').placeholder='例如：为什么归并排序是稳定的？';
   $('#create-branch').innerHTML='<i data-lucide="git-branch"></i>创建分支';
+  $('#branch-type-controls').innerHTML=branchTypeControls();
   state.branchTargetId=threadId;
   state.branchMessageId=messageId;
   $('#branch-dialog-title').textContent=`从「${thread.title}」延伸`;
@@ -240,6 +356,7 @@ function branch(threadId, messageId=null) {
   $('#branch-context').innerHTML=`<p class="branch-source-title">${escapeHtml(thread.title)}</p>${context.map(message=>`<div class="branch-context-message ${message.role}"><span>${message.role==='user'?'问题':'回答'}</span>${renderMarkdown(message.text)}</div>`).join('') || '<p class="branch-context-empty">从此线索继续探索。</p>'}`;
   $('#branch-drawer').classList.add('open');
   $('#branch-drawer').setAttribute('aria-hidden','false');
+  initIcons();
   setTimeout(()=>$('#branch-prompt').focus(),50);
 }
 function openNewThread() {
@@ -253,6 +370,7 @@ function openNewThread() {
   $('#branch-prompt-label').textContent='你想探索什么？';
   $('#branch-prompt').value='';
   $('#branch-prompt').placeholder='例如：为什么归并排序是稳定的？';
+  $('#branch-type-controls').innerHTML='';
   $('#create-branch').innerHTML='<i data-lucide="arrow-up"></i>开始探索';
   initIcons();
   setTimeout(()=>$('#branch-prompt').focus(),50);
@@ -260,6 +378,7 @@ function openNewThread() {
 function closeBranchDialog() {
   state.branchTargetId=null;
   state.branchMessageId=null;
+  $('#branch-type-controls').innerHTML='';
   $('#branch-drawer').classList.remove('open');
   $('#branch-drawer').classList.remove('new-thread-mode');
   $('#branch-drawer').setAttribute('aria-hidden','true');
@@ -276,6 +395,19 @@ function requestDelete(threadId) {
 }
 function deletionIdsFor(threadIds) {
   return [...new Set(threadIds.flatMap(id=>[id,...descendantIds(id)]))];
+}
+async function createThreadLinks(targetId, sourceIds, type='synthesis', label='综合') {
+  const ids=[...new Set(sourceIds)].filter(id=>id && id!==targetId && getThread(id));
+  if (!ids.length) return;
+  if (state.backendAvailable) {
+    try {
+      const response=await api('/api/links',{ method:'POST', body:JSON.stringify({ targetThreadId:targetId, sourceThreadIds:ids, type, label }) });
+      const links=await response.json();
+      state.links.push(...links.map(toClientLink));
+      return;
+    } catch (error) { toast(error.message || '创建合流连线失败'); }
+  }
+  state.links.push(...ids.map(sourceId=>({ id:`link-${sourceId}-${targetId}-${Date.now()}`, source:sourceId, target:targetId, type, label })));
 }
 function requestBulkDelete() {
   if (!state.selected.size) return;
@@ -305,6 +437,7 @@ async function deleteThreads(threadIds) {
   }
   state.threads=state.threads.filter(thread=>!ids.includes(thread.id));
   state.selected=new Set([...state.selected].filter(id=>!ids.includes(id)));
+  state.links=state.links.filter(link=>!ids.includes(link.source) && !ids.includes(link.target));
   state.activeId=state.threads[0]?.id || null;
   if (state.activeId) updateFocus(state.activeId);
   setMode('canvas');
@@ -314,9 +447,7 @@ async function deleteThreads(threadIds) {
 function refreshStreamingThread(thread) {
   const card=$(`[data-card="${thread.id}"]`);
   if (card) {
-    const preview=$('[data-card-preview]',card); if(preview) preview.innerHTML=renderMarkdown(thread.preview);
-    const count=$('[data-card-count]',card); if(count) count.textContent=`${thread.count} 条消息`;
-    const conversation=$('.card-conversation',card); if(conversation && thread.focused) conversation.innerHTML=thread.messages.slice(-3).map(message=>formatMessage(message,true)).join('');
+    const conversation=$('.card-conversation',card); if(conversation) conversation.innerHTML=thread.messages.slice(-3).map(message=>formatMessage(message,true)).join('');
   }
   $$(`[data-message]`).forEach(element=>{
     const message=thread.messages.find(item=>item.id===element.dataset.message);
@@ -349,6 +480,32 @@ async function addMessage(threadId, raw) {
   const child=await createThread(value,threadId,false,parent.messages.at(-1)?.id || null,'continuation');
   if(child) await sendMessageToThread(child.id,value);
 }
+function synthesisPrompt(threads) {
+  const sources=threads.map((thread,index)=>{
+    const messages=thread.messages.slice(-5).map(message=>`${message.role==='user'?'问题':'回答'}：${message.text}`).join('\n');
+    return `## 来源 ${index+1}：${thread.title}\n${messages || '暂无对话内容'}`;
+  }).join('\n\n');
+  return `请把下面 ${threads.length} 条非线性探索线索综合成一张新的合流卡片。\n\n要求：\n- 先给出一个统一结论。\n- 列出这些线索互相补充或冲突的地方。\n- 给出下一步最值得追问的问题。\n- 回答要紧凑，适合放在画布卡片里。\n\n${sources}`;
+}
+async function synthesizeSelectedThreads() {
+  const threads=[...state.selected].map(getThread).filter(Boolean).slice(0,3);
+  if (threads.length < 2) { toast('至少选择两条线索'); return; }
+  if (state.selected.size > 3) toast('先综合前 3 条已选线索');
+  const bounds=threads.map(cardFootprint);
+  const maxX=Math.max(...bounds.map(item=>item.x+item.width));
+  const avgY=bounds.reduce((sum,item)=>sum+item.y,0)/bounds.length;
+  const title=`综合：${threads.map(thread=>thread.title).join(' / ')}`.slice(0,38);
+  const prompt=synthesisPrompt(threads);
+  const thread=await createThread(prompt,null,false,null,'synthesis',{title,position:findOpenPosition({x:maxX+90,y:Math.max(70,avgY)}),topic:'#4f46e5'});
+  if (thread) {
+    await createThreadLinks(thread.id, threads.map(item=>item.id), 'synthesis', '综合');
+    state.selected.clear();
+    state.selected.add(thread.id);
+    renderAll();
+    void sendMessageToThread(thread.id,prompt);
+    toast('正在生成综合卡片');
+  }
+}
 function exportMarkdown() { const markdown=state.threads.map(thread=>`# ${thread.title}\n\n${thread.messages.map(m=>`## ${m.role==='user'?'你':'Synapse'}\n\n${m.text}`).join('\n\n')}`).join('\n\n---\n\n'); const blob=new Blob([markdown],{type:'text/markdown;charset=utf-8'});const url=URL.createObjectURL(blob);const a=document.createElement('a');a.href=url;a.download='synapse-算法复习.md';a.click();URL.revokeObjectURL(url);toast('已导出 Markdown'); }
 function openCommand() { $('#command-dialog').showModal(); renderCommandResults(''); setTimeout(()=>$('#command-search').focus(),50); }
 function settingsPayload() { return { provider:$('#provider-input').value, baseUrl:$('#base-url-input').value.trim(), apiKey:$('#api-key-input').value.trim(), model:$('#model-input').value.trim(), systemPrompt:$('#system-prompt-input').value.trim() }; }
@@ -380,19 +537,23 @@ function bindEvents() {
     const select=event.target.closest('[data-select]'); if(select){event.stopPropagation(); const id=select.dataset.select; const shouldSelect=select.matches('input[type="checkbox"]') ? select.checked : !state.selected.has(id); shouldSelect?state.selected.add(id):state.selected.delete(id);renderAll();return;}
     const card=event.target.closest('[data-card]');
     if(card && suppressCardActivationId===card.dataset.card){suppressCardActivationId=null;event.preventDefault();event.stopPropagation();return;}
-    if(card && !event.target.closest('button,input,textarea,.card-top,.card-conversation')) { const thread=getThread(card.dataset.card); if(thread && !thread.focused){updateFocus(thread.id);renderAll();} return; }
+    if(card && !event.target.closest('button,input,textarea,.quick-branch')) { updateFocus(card.dataset.card); renderActiveState(); return; }
     const button=event.target.closest('[data-action]'); if(!button)return;const action=button.dataset.action;const id=button.dataset.thread;
     if(action==='new-thread') openNewThread();
     if(action==='new-workspace') openWorkspaceDialog();
     if(action==='close-workspace') closeWorkspaceDialog();
     if(action==='activate'){updateFocus(id);setMode('thread');renderAll();}
-    if(action==='toggle-card'){const thread=getThread(id);if(thread.focused){thread.focused=false;state.activeId=id;}else{updateFocus(id);}renderAll();}
     if(action==='open-thread'){state.activeId=id;setMode('thread');renderAll();}
     if(action==='show-canvas'){setMode('canvas');}
+    if(action==='quick-branch') openQuickBranch(id||state.activeId);
+    if(action==='close-quick-branch') closeQuickBranch();
+    if(action==='close-quick-reply') closeQuickReply();
+    if(action==='set-branch-type') setBranchType(button.dataset.branchType);
     if(action==='branch') branch(id||state.activeId, button.dataset.message || null);
     if(action==='close-branch') closeBranchDialog();
     if(action==='request-delete') requestDelete(id||state.activeId);
     if(action==='request-bulk-delete') requestBulkDelete();
+    if(action==='synthesize-selected') void synthesizeSelectedThreads();
     if(action==='close-delete') closeDeleteDialog();
     if(action==='export')exportMarkdown();
     if(action==='command')openCommand();
@@ -404,7 +565,8 @@ function bindEvents() {
     if(action==='copy'){const message=getThread(id||state.activeId)?.messages.find(item=>item.id===button.dataset.message);navigator.clipboard?.writeText(message?.text||'');toast('已复制回答');}
   });
   $$('.mode-button').forEach(button=>button.addEventListener('click',()=>setMode(button.dataset.mode)));
-  $('#branch-form').addEventListener('submit',async event=>{event.preventDefault();const prompt=$('#branch-prompt').value.trim();if(!prompt){$('#branch-prompt').focus();return;}const parent=state.branchTargetId;const create=$('#create-branch');create.disabled=true;try{const created=await createThread(prompt,parent,true,state.branchMessageId);if(created)closeBranchDialog();}finally{create.disabled=false;}});
+  $('#cards-layer').addEventListener('submit',async event=>{const branchForm=event.target.closest('[data-quick-branch]');const replyForm=event.target.closest('[data-quick-reply]');if(!branchForm&&!replyForm)return;event.preventDefault();const form=branchForm||replyForm;const input=$('textarea',form);const value=input.value.trim();if(!value){input.focus();return;}const submit=$('button[type="submit"]',form);submit.disabled=true;try{if(branchForm){const prompt=branchPrompt(activeBranchType(),value);const created=await createThread(prompt,branchForm.dataset.quickBranch,true,getThread(branchForm.dataset.quickBranch)?.messages.at(-1)?.id || null);if(created){state.quickBranchTargetId=null;renderAll();}}else{state.quickReplyTargetId=null;await sendMessageToThread(replyForm.dataset.quickReply,value);}}finally{submit.disabled=false;}});
+  $('#branch-form').addEventListener('submit',async event=>{event.preventDefault();const value=$('#branch-prompt').value.trim();if(!value){$('#branch-prompt').focus();return;}const parent=state.branchTargetId;const prompt=parent ? branchPrompt(activeBranchType(),value) : value;const create=$('#create-branch');create.disabled=true;try{const created=await createThread(prompt,parent,true,state.branchMessageId);if(created)closeBranchDialog();}finally{create.disabled=false;}});
   $('#delete-form').addEventListener('submit',async event=>{event.preventDefault();const targets=state.deleteTargetIds;if(!targets.length)return;const submit=$('#delete-form button[type="submit"]');submit.disabled=true;try{await deleteThreads(targets);closeDeleteDialog();}finally{submit.disabled=false;}});
   $('#workspace-form').addEventListener('submit',event=>{event.preventDefault();const title=$('#workspace-title-input').value.trim() || '未命名画布';void createWorkspace(title);});
   $('#workspace-selector').addEventListener('change',event=>{const nextId=event.target.value;if(nextId && nextId!==state.workspaceId){state.pan={x:0,y:0};state.scale=1;void bootstrap(nextId).then(()=>setMode('canvas'));}});
@@ -415,12 +577,35 @@ function bindEvents() {
   document.addEventListener('submit',event=>{const form=event.target.closest('[data-compose]');if(!form)return;event.preventDefault();const input=$('textarea, input',form);void addMessage(form.dataset.compose,input.value);});
   $('#command-search').addEventListener('input',event=>renderCommandResults(event.target.value));
   $('#command-results').addEventListener('click',event=>{const button=event.target.closest('[data-command]');if(!button)return;$('#command-dialog').close();if(button.dataset.command==='thread'){state.activeId=button.dataset.thread;setMode('thread');renderAll();}if(button.dataset.command==='new')openNewThread();if(button.dataset.command==='compare')setMode('compare');});
-  document.addEventListener('keydown',event=>{const mod=event.ctrlKey||event.metaKey;if(mod&&event.key.toLowerCase()==='k'){event.preventDefault();openCommand();}if(mod&&event.key.toLowerCase()==='n'){event.preventDefault();openNewThread();}if(mod&&event.key.toLowerCase()==='b'){event.preventDefault();branch(state.activeId);}if(mod&&event.shiftKey&&event.key.toLowerCase()==='c'){event.preventDefault();setMode('compare');}if(mod&&['1','2','3'].includes(event.key)){event.preventDefault();setMode({1:'canvas',2:'thread',3:'compare'}[event.key]);}});
+  document.addEventListener('keydown',event=>{
+    const quickForm=event.target.closest?.('[data-quick-branch]');
+    const quickReplyForm=event.target.closest?.('[data-quick-reply]');
+    if(quickForm && event.key==='Enter' && !event.shiftKey){event.preventDefault();quickForm.requestSubmit();return;}
+    if(quickForm && event.key==='Escape'){event.preventDefault();closeQuickBranch();return;}
+    if(quickReplyForm && event.key==='Enter' && !event.shiftKey){event.preventDefault();quickReplyForm.requestSubmit();return;}
+    if(quickReplyForm && event.key==='Escape'){event.preventDefault();closeQuickReply();return;}
+    const mod=event.ctrlKey||event.metaKey;
+    if(mod&&event.key.toLowerCase()==='n'){event.preventDefault();openNewThread();return;}
+    if(mod&&event.key.toLowerCase()==='b'){event.preventDefault();branch(state.activeId);return;}
+    if(mod&&event.shiftKey&&event.key.toLowerCase()==='c'){event.preventDefault();setMode('compare');return;}
+    if(mod&&['1','2','3'].includes(event.key)){event.preventDefault();setMode({1:'canvas',2:'thread',3:'compare'}[event.key]);return;}
+    if(isTextInputTarget(event.target)) return;
+    if(event.key==='Escape'){
+      if(state.quickBranchTargetId){event.preventDefault();closeQuickBranch();return;}
+      if(state.quickReplyTargetId){event.preventDefault();closeQuickReply();return;}
+      if($('#branch-drawer').classList.contains('open')){event.preventDefault();closeBranchDialog();return;}
+    }
+    if(state.mode!=='canvas' || document.querySelector('dialog[open]')) return;
+    const directionKeys={ArrowLeft:'left',ArrowRight:'right',ArrowUp:'up',ArrowDown:'down'};
+    if(directionKeys[event.key]){event.preventDefault();const next=directionalThread(directionKeys[event.key]);if(next){updateFocus(next.id);renderActiveState();}return;}
+    if(event.key==='Tab'){event.preventDefault();openQuickBranch(state.activeId);return;}
+    if(event.key==='Enter'){event.preventDefault();openQuickReply(state.activeId);return;}
+  });
   const viewport=$('#canvas-viewport');let panStart=null,drag=null,suppressCardActivationId=null;
-  viewport.addEventListener('pointerdown',event=>{const card=event.target.closest('[data-card]');const handle=event.target.closest('.card-top');if(card && handle && !event.target.closest('button')){const thread=getThread(card.dataset.card);drag={id:thread.id,card,startX:event.clientX,startY:event.clientY,baseX:thread.x,baseY:thread.y,moved:false};card.setPointerCapture(event.pointerId);return;}if(event.target===viewport||event.target.closest('.canvas-grid')){panStart={x:event.clientX,y:event.clientY,baseX:state.pan.x,baseY:state.pan.y};viewport.classList.add('panning');}});
+  viewport.addEventListener('pointerdown',event=>{const card=event.target.closest('[data-card]');const handle=event.target.closest('.card-top,.card-path');if(card && handle && !event.target.closest('button')){const thread=getThread(card.dataset.card);drag={id:thread.id,card,startX:event.clientX,startY:event.clientY,baseX:thread.x,baseY:thread.y,moved:false};card.setPointerCapture(event.pointerId);return;}if(card)return;if(event.target===viewport||event.target.closest('.canvas-grid')){panStart={x:event.clientX,y:event.clientY,baseX:state.pan.x,baseY:state.pan.y};viewport.classList.add('panning');}});
   window.addEventListener('pointermove',event=>{if(drag){const deltaX=event.clientX-drag.startX;const deltaY=event.clientY-drag.startY;if(!drag.moved && (Math.abs(deltaX)>3||Math.abs(deltaY)>3))drag.moved=true;if(drag.moved){const thread=getThread(drag.id);thread.x=drag.baseX+deltaX/state.scale;thread.y=drag.baseY+deltaY/state.scale;drag.card.style.left=`${thread.x}px`;drag.card.style.top=`${thread.y}px`;refreshConnectorsForThread(thread.id);}}if(panStart){state.pan.x=panStart.baseX+event.clientX-panStart.x;state.pan.y=panStart.baseY+event.clientY-panStart.y;applyCanvasTransform();}});
   window.addEventListener('pointerup',()=>{const movedThread=drag?.moved ? getThread(drag.id) : null;drag=null;panStart=null;viewport.classList.remove('panning');if(movedThread){suppressCardActivationId=movedThread.id;setTimeout(()=>{if(suppressCardActivationId===movedThread.id)suppressCardActivationId=null;},0);void persistThread(movedThread);}});
-  viewport.addEventListener('wheel',event=>{if(event.target.closest('.card-conversation'))return;event.preventDefault();zoomCanvas(state.scale+(event.deltaY>0?-.06:.06),event.clientX,event.clientY);},{passive:false});
+  viewport.addEventListener('wheel',event=>{if(event.target.closest('.card-conversation,.quick-branch'))return;event.preventDefault();zoomCanvas(state.scale+(event.deltaY>0?-.06:.06),event.clientX,event.clientY);},{passive:false});
   $('#sync-scroll').addEventListener('change',event=>{if(!event.target.checked)return;$$('[data-scroll-column]').forEach(column=>column.addEventListener('scroll',syncScroll));});
 }
 function syncScroll(event){if(!$('#sync-scroll').checked)return;$$('[data-scroll-column]').forEach(column=>{if(column!==event.currentTarget)column.scrollTop=event.currentTarget.scrollTop;});}
