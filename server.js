@@ -21,7 +21,10 @@ function defaultSettings() {
     baseUrl: process.env.OPENAI_BASE_URL || 'https://api.openai.com/v1',
     apiKey: process.env.OPENAI_API_KEY || '',
     model: process.env.OPENAI_MODEL || '',
-    systemPrompt: process.env.SYSTEM_PROMPT || DEFAULT_SYSTEM_PROMPT
+    systemPrompt: process.env.SYSTEM_PROMPT || DEFAULT_SYSTEM_PROMPT,
+    searchProvider: process.env.SEARCH_PROVIDER || 'off',
+    searchApiKey: process.env.TAVILY_API_KEY || process.env.SEARCH_API_KEY || '',
+    searchMaxResults: Number(process.env.SEARCH_MAX_RESULTS || 5)
   };
 }
 function makeMessage(threadId, role, content) { return { id: randomUUID(), threadId, role, content, createdAt: now() }; }
@@ -90,7 +93,7 @@ async function openDatabase() {
   const raw = existsSync(DB_FILE) ? new SQL.Database(readFileSync(DB_FILE)) : new SQL.Database();
   db = createDatabaseFacade(raw);
   db.exec(`
-    CREATE TABLE IF NOT EXISTS settings (id INTEGER PRIMARY KEY CHECK (id = 1), provider TEXT NOT NULL, base_url TEXT NOT NULL, api_key TEXT NOT NULL, model TEXT NOT NULL, system_prompt TEXT NOT NULL);
+    CREATE TABLE IF NOT EXISTS settings (id INTEGER PRIMARY KEY CHECK (id = 1), provider TEXT NOT NULL, base_url TEXT NOT NULL, api_key TEXT NOT NULL, model TEXT NOT NULL, system_prompt TEXT NOT NULL, search_provider TEXT NOT NULL DEFAULT 'off', search_api_key TEXT NOT NULL DEFAULT '', search_max_results INTEGER NOT NULL DEFAULT 5);
     CREATE TABLE IF NOT EXISTS workspaces (id TEXT PRIMARY KEY, title TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
     CREATE TABLE IF NOT EXISTS threads (id TEXT PRIMARY KEY, workspace_id TEXT NOT NULL REFERENCES workspaces(id), parent_thread_id TEXT, parent_message_id TEXT, title TEXT NOT NULL, topic TEXT NOT NULL, model TEXT NOT NULL, status TEXT NOT NULL, pinned INTEGER NOT NULL DEFAULT 0, position_x REAL NOT NULL, position_y REAL NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
     CREATE TABLE IF NOT EXISTS messages (id TEXT PRIMARY KEY, thread_id TEXT NOT NULL REFERENCES threads(id) ON DELETE CASCADE, role TEXT NOT NULL CHECK (role IN ('user', 'assistant')), content TEXT NOT NULL, created_at TEXT NOT NULL);
@@ -98,12 +101,17 @@ async function openDatabase() {
     CREATE INDEX IF NOT EXISTS messages_thread_created_idx ON messages(thread_id, created_at);
     CREATE INDEX IF NOT EXISTS threads_workspace_idx ON threads(workspace_id);
   `);
-  if (!db.prepare('PRAGMA table_info(settings)').all().some(column => column.name === 'system_prompt')) db.exec(`ALTER TABLE settings ADD COLUMN system_prompt TEXT NOT NULL DEFAULT '${DEFAULT_SYSTEM_PROMPT.replace(/'/g, "''")}'`);
+  const settingColumns = db.prepare('PRAGMA table_info(settings)').all();
+  const hasSettingColumn = name => settingColumns.some(column => column.name === name);
+  if (!hasSettingColumn('system_prompt')) db.exec(`ALTER TABLE settings ADD COLUMN system_prompt TEXT NOT NULL DEFAULT '${DEFAULT_SYSTEM_PROMPT.replace(/'/g, "''")}'`);
+  if (!hasSettingColumn('search_provider')) db.exec("ALTER TABLE settings ADD COLUMN search_provider TEXT NOT NULL DEFAULT 'off'");
+  if (!hasSettingColumn('search_api_key')) db.exec("ALTER TABLE settings ADD COLUMN search_api_key TEXT NOT NULL DEFAULT ''");
+  if (!hasSettingColumn('search_max_results')) db.exec("ALTER TABLE settings ADD COLUMN search_max_results INTEGER NOT NULL DEFAULT 5");
   if (!db.prepare('SELECT 1 FROM workspaces LIMIT 1').get()) seedDatabase(db);
   if (!db.prepare('SELECT 1 FROM settings WHERE id = 1').get()) {
     const legacy = existsSync(LEGACY_SETTINGS_FILE) ? JSON.parse(readFileSync(LEGACY_SETTINGS_FILE, 'utf8')) : {};
     const setting = { ...defaultSettings(), ...legacy };
-    db.prepare('INSERT INTO settings (id, provider, base_url, api_key, model, system_prompt) VALUES (1, ?, ?, ?, ?, ?)').run(setting.provider, setting.baseUrl, setting.apiKey, setting.model, setting.systemPrompt || DEFAULT_SYSTEM_PROMPT);
+    db.prepare('INSERT INTO settings (id, provider, base_url, api_key, model, system_prompt, search_provider, search_api_key, search_max_results) VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?)').run(setting.provider, setting.baseUrl, setting.apiKey, setting.model, setting.systemPrompt || DEFAULT_SYSTEM_PROMPT, setting.searchProvider, setting.searchApiKey, setting.searchMaxResults);
   }
   return db;
 }
@@ -123,20 +131,25 @@ function seedDatabase(db) {
   insert();
 }
 
-function settingRow() { return db.prepare('SELECT provider, base_url, api_key, model, system_prompt FROM settings WHERE id = 1').get(); }
+function settingRow() { return db.prepare('SELECT provider, base_url, api_key, model, system_prompt, search_provider, search_api_key, search_max_results FROM settings WHERE id = 1').get(); }
 function configuredModelName() { const row = settingRow(); return row.provider === 'demo' ? 'Synapse Demo' : (row.model || 'Configured model'); }
-function publicSettings() { const row = settingRow(); return { provider: row.provider, baseUrl: row.base_url, model: row.model, systemPrompt: row.system_prompt || DEFAULT_SYSTEM_PROMPT, hasApiKey: Boolean(row.api_key) }; }
+function publicSettings() { const row = settingRow(); return { provider: row.provider, baseUrl: row.base_url, model: row.model, systemPrompt: row.system_prompt || DEFAULT_SYSTEM_PROMPT, hasApiKey: Boolean(row.api_key), searchProvider: row.search_provider || 'off', searchMaxResults: Number(row.search_max_results || 5), hasSearchApiKey: Boolean(row.search_api_key) }; }
 function applySettings(input, { includeApiKey = true } = {}) {
   const current = settingRow();
   const provider = input.provider || current.provider;
   if (!['demo', 'openai-compatible'].includes(provider)) throw new Error('Unsupported provider');
-  const next = { provider, baseUrl: String(input.baseUrl || current.base_url).replace(/\/$/, ''), apiKey: current.api_key, model: String(input.model || current.model).trim(), systemPrompt: typeof input.systemPrompt === 'string' ? input.systemPrompt.trim().slice(0, 8000) : (current.system_prompt || DEFAULT_SYSTEM_PROMPT) };
+  const searchProvider = input.searchProvider || current.search_provider || 'off';
+  if (!['off', 'tavily'].includes(searchProvider)) throw new Error('Unsupported search provider');
+  const maxResults = Number(input.searchMaxResults ?? current.search_max_results ?? 5);
+  const next = { provider, baseUrl: String(input.baseUrl || current.base_url).replace(/\/$/, ''), apiKey: current.api_key, model: String(input.model || current.model).trim(), systemPrompt: typeof input.systemPrompt === 'string' ? input.systemPrompt.trim().slice(0, 8000) : (current.system_prompt || DEFAULT_SYSTEM_PROMPT), searchProvider, searchApiKey: current.search_api_key || '', searchMaxResults: Math.min(8, Math.max(3, Number.isFinite(maxResults) ? Math.round(maxResults) : 5)) };
   if (provider === 'openai-compatible') { try { new URL(next.baseUrl); } catch { throw new Error('Model service URL is invalid'); } }
   if (includeApiKey && typeof input.apiKey === 'string' && input.apiKey.trim()) next.apiKey = input.apiKey.trim();
   if (input.clearApiKey === true) next.apiKey = '';
+  if (includeApiKey && typeof input.searchApiKey === 'string' && input.searchApiKey.trim()) next.searchApiKey = input.searchApiKey.trim();
+  if (input.clearSearchApiKey === true) next.searchApiKey = '';
   return next;
 }
-function saveSettings(settings) { db.prepare('UPDATE settings SET provider = ?, base_url = ?, api_key = ?, model = ?, system_prompt = ? WHERE id = 1').run(settings.provider, settings.baseUrl, settings.apiKey, settings.model, settings.systemPrompt || DEFAULT_SYSTEM_PROMPT); }
+function saveSettings(settings) { db.prepare('UPDATE settings SET provider = ?, base_url = ?, api_key = ?, model = ?, system_prompt = ?, search_provider = ?, search_api_key = ?, search_max_results = ? WHERE id = 1').run(settings.provider, settings.baseUrl, settings.apiKey, settings.model, settings.systemPrompt || DEFAULT_SYSTEM_PROMPT, settings.searchProvider, settings.searchApiKey, settings.searchMaxResults); }
 function getThread(id) { return db.prepare('SELECT * FROM threads WHERE id = ?').get(id); }
 function rowThread(row) { return row && { id: row.id, workspaceId: row.workspace_id, parentThreadId: row.parent_thread_id, parentMessageId: row.parent_message_id, title: row.title, topic: row.topic, model: row.model, status: row.status, pinned: Boolean(row.pinned), position: { x: row.position_x, y: row.position_y }, createdAt: row.created_at, updatedAt: row.updated_at }; }
 function messagesFor(threadId) { return db.prepare('SELECT id, thread_id, role, content, created_at FROM messages WHERE thread_id = ? ORDER BY created_at').all(threadId).map(row => ({ id: row.id, threadId: row.thread_id, role: row.role, content: row.content, createdAt: row.created_at })); }
@@ -153,6 +166,36 @@ function workspacePayload(workspaceId) {
 function safeTitle(value) { return String(value || '未命名线索').trim().slice(0, 80) || '未命名线索'; }
 function safeWorkspaceTitle(value) { return String(value || '未命名画布').trim().slice(0, 80) || '未命名画布'; }
 function topicFor(index) { return ['#0d9488', '#d97706', '#0369a1', '#be123c', '#6d28d9', '#059669', '#c2410c'][index % 7]; }
+function synthesisSourceRows(threadId) {
+  return db.prepare(`
+    SELECT threads.*
+    FROM links
+    JOIN threads ON threads.id = links.source_thread_id
+    WHERE links.target_thread_id = ? AND links.type = 'synthesis'
+    ORDER BY links.id
+  `).all(threadId);
+}
+function sourceThreadDigest(threadRow, index) {
+  const messages = messagesFor(threadRow.id).slice(-8).map(message => {
+    const label = message.role === 'user' ? '用户' : '助手';
+    return `${label}：${String(message.content || '').replace(/\s+/g, ' ').trim().slice(0, 900)}`;
+  }).join('\n');
+  return `## 来源线索 ${index + 1}：${threadRow.title}\n${messages || '暂无对话内容'}`;
+}
+function synthesisContextMessages(threadRow) {
+  const sources = synthesisSourceRows(threadRow.id);
+  if (!sources.length) return [];
+  return [{
+    role: 'system',
+    content: [
+      '当前线索是一张合流/综合卡片。它由下面这些来源线索连接而来。',
+      '回答用户时必须把这些来源线索视为当前问题的主要上下文；如果用户说“这两个/这些/合并它们”，指的就是这些来源线索。',
+      '请先理解各来源的观点、事实和未解决问题，再生成综合回答，不要声称没有看到具体项目。',
+      '',
+      sources.map(sourceThreadDigest).join('\n\n')
+    ].join('\n')
+  }];
+}
 function buildConversation(threadRow) {
   const trail = []; let cursor = threadRow;
   while (cursor?.parent_thread_id) {
@@ -161,24 +204,156 @@ function buildConversation(threadRow) {
     const cutoff = cursor.parent_message_id ? parentMessages.findIndex(message => message.id === cursor.parent_message_id) : parentMessages.length - 1;
     trail.unshift(...parentMessages.slice(0, cutoff + 1)); cursor = parent;
   }
-  return [...trail, ...messagesFor(threadRow.id)].map(message => ({ role: message.role, content: message.content }));
+  const lineageMessages = [...trail, ...messagesFor(threadRow.id)].map(message => ({ role: message.role, content: message.content }));
+  return [...synthesisContextMessages(threadRow), ...lineageMessages];
+}
+function sourceMarkdown(sources) {
+  if (!sources?.length) return '';
+  return `\n\n---\n\n### 来源\n${sources.map((source, index) => `${index + 1}. [${source.title || source.url}](${source.url})${source.publishedDate ? `（${source.publishedDate}）` : ''}`).join('\n')}`;
+}
+function currentDateContext() {
+  const timeZone = process.env.APP_TIME_ZONE || 'Asia/Shanghai';
+  const date = new Date();
+  const isoDate = new Intl.DateTimeFormat('en-CA', { timeZone, year: 'numeric', month: '2-digit', day: '2-digit' }).format(date);
+  const localDate = new Intl.DateTimeFormat('zh-CN', { timeZone, year: 'numeric', month: 'long', day: 'numeric', weekday: 'long' }).format(date);
+  return { isoDate, localDate, timeZone };
+}
+function searchPolicyPrompt() {
+  const date = currentDateContext();
+  return [
+    `当前日期：${date.isoDate}（${date.localDate}，${date.timeZone}）。`,
+    '用户说“今天、今日、现在、最近、最新”等相对时间时，必须按当前日期理解，不要使用模型训练数据里的日期。',
+    '联网搜索是一项 agent 工具能力，不是普通关键词匹配。只有当外部证据能显著提升准确性时才调用。',
+    '调用 web_search 时填写“信息需求”，不要把“今天”“新闻”等孤立词当成搜索词。',
+    '如果用户问“今天有什么新闻/今日要闻”，信息需求应表达为“当天重要新闻/要闻概览”，并选择 news 类别和 today 新鲜度。',
+    '如果使用工具得到来源，最终回答必须综合来源内容，避免只输出链接列表，并在关键事实后用 [1]、[2] 引用。'
+  ].join('\n');
+}
+function resolveSearchRequest(args = {}, userPrompt = '') {
+  const date = currentDateContext();
+  const informationNeed = String(args.information_need || args.query || userPrompt || '').replace(/\s+/g, ' ').trim().slice(0, 240);
+  const category = ['news', 'general'].includes(args.category) ? args.category : 'general';
+  const freshness = ['today', 'recent', 'month', 'any'].includes(args.freshness) ? args.freshness : (category === 'news' ? 'recent' : 'any');
+  const region = String(args.region || '中国').replace(/\s+/g, ' ').trim().slice(0, 60) || '中国';
+  const need = informationNeed || userPrompt || '需要查找的事实';
+  const query = category === 'news' ? `${date.isoDate} ${region} ${need} 重要新闻 要闻` : `${need} ${date.isoDate}`;
+  const timeRange = freshness === 'today' ? 'day' : freshness === 'recent' ? 'week' : freshness === 'month' ? 'month' : undefined;
+  const days = freshness === 'today' ? 1 : freshness === 'recent' ? 7 : freshness === 'month' ? 30 : undefined;
+  return { query, topic: category === 'news' ? 'news' : 'general', timeRange, days, informationNeed: need, region, currentDate: date.isoDate };
+}
+async function searchWeb(request) {
+  const settings = settingRow();
+  const provider = settings.search_provider || 'off';
+  if (provider === 'off') throw new Error('联网搜索尚未开启，请先在设置中选择搜索服务');
+  if (provider !== 'tavily') throw new Error('暂不支持此搜索服务');
+  if (!settings.search_api_key) throw new Error('请先在设置中填写 Tavily API Key');
+  const configuredMaxResults = Number(settings.search_max_results || 5);
+  const maxResults = Number.isFinite(configuredMaxResults) ? Math.min(8, Math.max(3, Math.round(configuredMaxResults))) : 5;
+  const body = { query: request.query, search_depth: 'basic', topic: request.topic, max_results: maxResults, include_answer: false, include_raw_content: false, include_images: false };
+  if (request.topic === 'news' && request.days) body.days = request.days;
+  if (request.topic !== 'news' && request.timeRange) body.time_range = request.timeRange;
+  const response = await fetch('https://api.tavily.com/search', {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${settings.search_api_key}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify(body)
+  });
+  const payload = await response.json().catch(() => ({}));
+  if (!response.ok) throw new Error(payload.error || payload.message || `搜索服务返回 HTTP ${response.status}`);
+  return (payload.results || []).map(result => ({
+    title: String(result.title || result.url || '未命名来源').replace(/\s+/g, ' ').trim().slice(0, 120),
+    url: String(result.url || '').trim(),
+    content: String(result.content || result.snippet || '').replace(/\s+/g, ' ').trim().slice(0, 700),
+    publishedDate: String(result.published_date || result.publishedDate || '').slice(0, 32),
+    score: Number(result.score || 0)
+  })).filter(source => source.url).slice(0, maxResults);
+}
+function searchEnabled(settings) { return (settings.search_provider || 'off') !== 'off' && Boolean(settings.search_api_key); }
+function agentTools(settings) {
+  if (!searchEnabled(settings)) return [];
+  return [{
+    type: 'function',
+    function: {
+      name: 'web_search',
+      description: 'Search the web as an agent capability when current, fast-changing, niche, or source-sensitive information is needed. Provide the information need, not a raw keyword. The backend will ground relative dates in the current date and choose the search vertical.',
+      parameters: {
+        type: 'object',
+        properties: {
+          information_need: { type: 'string', description: 'A complete sentence describing what evidence is needed. Do not pass only words like today, latest, or news.' },
+          category: { type: 'string', enum: ['general', 'news'], description: 'Use news for headlines, current events, announcements, incidents, and broad daily news questions.' },
+          freshness: { type: 'string', enum: ['today', 'recent', 'month', 'any'], description: 'Use today for same-day news, recent for the last several days, month for recent background, any for timeless sources.' },
+          region: { type: 'string', description: 'Relevant geographic or market scope, such as 中国, 美国, 全球, or a city/country name.' }
+        },
+        required: ['information_need', 'category', 'freshness'],
+        additionalProperties: false
+      }
+    }
+  }];
+}
+function toolResultContent(sources, request) {
+  return JSON.stringify({ request, sources: sources.map((source, index) => ({ index: index + 1, title: source.title, url: source.url, published_date: source.publishedDate, snippet: source.content })) });
+}
+function stripToolCallText(content) {
+  return String(content || '').replace(/<tool_call>[\s\S]*?<\/tool_call>/g, '').trim();
+}
+function finalAnswerInstruction(currentPrompt, sources) {
+  const sourceCount = sources.length;
+  return [
+    `请直接回答用户当前问题：${currentPrompt}`,
+    sourceCount ? `你已经获得 ${sourceCount} 条搜索来源。必须先综合成自然语言结论，再在关键事实后用 [1]、[2] 引用。` : '如果没有使用工具，就基于已有上下文直接回答。',
+    '不要输出 <tool_call>、函数参数、JSON、搜索 query、工具调试信息或单纯来源列表。',
+    '如果来源与问题不匹配，要说明无法从这些来源可靠确认，而不是强行回答。'
+  ].join('\n');
+}
+function looksLikeToolCallLeak(answer) {
+  return /<tool_call>|<\/tool_call>|<function=|<parameter=|^\s*(general|news)\s+(today|recent|year|month|any)\b/i.test(String(answer || ''));
+}
+async function requestChatCompletion(settings, body) {
+  const response = await fetch(`${settings.base_url.replace(/\/$/, '')}/chat/completions`, { method: 'POST', headers: { Authorization: `Bearer ${settings.api_key}`, 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+  if (!response.ok) throw new Error(`Model request failed: ${response.status} ${await response.text()}`);
+  return response;
 }
 function demoAnswer(thread, prompt) { const prior = buildConversation(thread).filter(message => message.role === 'user').length; return `沿着「${thread.title}」继续：${prompt}\n\n可以先把问题拆成两个层次：**定义或前提**，以及它在具体例子中的表现。这里已经带入了此分支的 ${prior} 条上下文消息；其他线索不会影响这个回答。\n\n下一步可从一个反例或边界情况检验这个结论。`; }
-async function streamOpenAICompatible(thread, onDelta) {
+async function streamOpenAICompatible(thread, currentPrompt, onDelta, options = {}) {
   const settings = settingRow();
   if (!settings.api_key) throw new Error('模型服务尚未设置 API Key');
   if (!settings.model) throw new Error('模型服务尚未选择模型');
-  const response = await fetch(`${settings.base_url.replace(/\/$/, '')}/chat/completions`, { method: 'POST', headers: { Authorization: `Bearer ${settings.api_key}`, 'Content-Type': 'application/json' }, body: JSON.stringify({ model: settings.model, stream: true, messages: [{ role: 'system', content: settings.system_prompt || DEFAULT_SYSTEM_PROMPT }, ...buildConversation(thread)] }) });
-  if (!response.ok || !response.body) throw new Error(`Model request failed: ${response.status} ${await response.text()}`);
+  const tools = agentTools(settings);
+  const messages = [{ role: 'system', content: `${settings.system_prompt || DEFAULT_SYSTEM_PROMPT}\n\n${searchPolicyPrompt()}` }, ...buildConversation(thread)];
+  let sources = [];
+  if (tools.length) {
+    const decisionResponse = await requestChatCompletion(settings, { model: settings.model, stream: false, messages, tools, tool_choice: 'auto' });
+    const decision = await decisionResponse.json();
+    const assistantMessage = decision.choices?.[0]?.message;
+    const toolCalls = Array.isArray(assistantMessage?.tool_calls) ? assistantMessage.tool_calls : [];
+    if (toolCalls.length) {
+      const plannerContent = stripToolCallText(assistantMessage.content);
+      messages.push({ role: 'assistant', content: plannerContent || null, tool_calls: toolCalls });
+      for (const call of toolCalls) {
+        if (call.function?.name !== 'web_search') continue;
+        let args = {};
+        try { args = JSON.parse(call.function.arguments || '{}'); } catch { args = {}; }
+        const request = resolveSearchRequest(args, currentPrompt);
+        if (!request.query) continue;
+        options.onStatus?.('正在联网搜索');
+        const results = await searchWeb(request);
+        sources.push(...results.filter(result => !sources.some(source => source.url === result.url)));
+        options.onSources?.(sources);
+        messages.push({ role: 'tool', tool_call_id: call.id, content: toolResultContent(results, request) });
+      }
+    }
+  }
+  const response = await requestChatCompletion(settings, { model: settings.model, stream: true, messages: [...messages, { role: 'user', content: finalAnswerInstruction(currentPrompt, sources) }] });
+  if (!response.body) throw new Error('Model request failed: empty response body');
   const reader = response.body.getReader(); const decoder = new TextDecoder(); let buffer = ''; let answer = '';
   while (true) {
     const { done, value } = await reader.read(); if (done) break;
     buffer += decoder.decode(value, { stream: true }); const lines = buffer.split('\n'); buffer = lines.pop();
     for (const line of lines) { if (!line.startsWith('data: ')) continue; const payload = line.slice(6).trim(); if (payload === '[DONE]') continue; try { const delta = JSON.parse(payload).choices?.[0]?.delta?.content; if (delta) { answer += delta; onDelta(delta); } } catch { /* provider keepalive */ } }
   }
-  return answer || '模型没有返回可显示的内容。';
+  if (looksLikeToolCallLeak(answer)) throw new Error('模型返回了工具调用内容而不是最终回答，请重试或换用支持工具调用的模型');
+  return { answer: answer || '模型没有返回可显示的内容。', sources };
 }
-async function streamReply(thread, prompt, onDelta) { const settings = settingRow(); if (settings.provider === 'demo') { const answer = demoAnswer(rowThread(thread), prompt); for (const part of answer.match(/.{1,12}/gu) || []) { onDelta(part); await new Promise(resolve => setTimeout(resolve, 14)); } return answer; } return streamOpenAICompatible(thread, onDelta); }
+async function streamReply(thread, prompt, onDelta, options = {}) { const settings = settingRow(); if (settings.provider === 'demo') { const answer = demoAnswer(rowThread(thread), prompt); for (const part of answer.match(/.{1,12}/gu) || []) { onDelta(part); await new Promise(resolve => setTimeout(resolve, 14)); } return { answer, sources: [] }; } return streamOpenAICompatible(thread, prompt, onDelta, options); }
 
 async function createApp() {
   await openDatabase();
@@ -246,7 +421,31 @@ async function createApp() {
     })();
     response.json({ deletedIds: ids });
   });
-  app.post('/api/threads/:id/messages', async (request, response) => { const thread = getThread(request.params.id); if (!thread) return response.status(404).json({ error: 'Thread not found' }); const prompt = String(request.body.content || '').trim(); if (!prompt) return response.status(400).json({ error: 'Message content is required' }); const userMessage = makeMessage(thread.id, 'user', prompt); db.prepare('INSERT INTO messages VALUES (?, ?, ?, ?, ?)').run(userMessage.id, userMessage.threadId, userMessage.role, userMessage.content, userMessage.createdAt); db.prepare('UPDATE threads SET updated_at = ? WHERE id = ?').run(now(), thread.id); response.status(200).set({ 'Content-Type': 'text/event-stream; charset=utf-8', 'Cache-Control': 'no-cache, no-transform', Connection: 'keep-alive' }); response.flushHeaders(); const send = payload => response.write(`data: ${JSON.stringify(payload)}\n\n`); send({ type: 'message', message: userMessage }); send({ type: 'start' }); try { const answer = await streamReply(getThread(thread.id), prompt, delta => send({ type: 'delta', delta })); const assistantMessage = makeMessage(thread.id, 'assistant', answer); db.prepare('INSERT INTO messages VALUES (?, ?, ?, ?, ?)').run(assistantMessage.id, assistantMessage.threadId, assistantMessage.role, assistantMessage.content, assistantMessage.createdAt); db.prepare('UPDATE threads SET updated_at = ? WHERE id = ?').run(now(), thread.id); send({ type: 'done', message: assistantMessage }); } catch (error) { send({ type: 'error', error: error.message || 'Unable to create a response' }); } response.end(); });
+  app.post('/api/threads/:id/messages', async (request, response) => {
+    const thread = getThread(request.params.id);
+    if (!thread) return response.status(404).json({ error: 'Thread not found' });
+    const prompt = String(request.body.content || '').trim();
+    if (!prompt) return response.status(400).json({ error: 'Message content is required' });
+    const userMessage = makeMessage(thread.id, 'user', prompt);
+    db.prepare('INSERT INTO messages VALUES (?, ?, ?, ?, ?)').run(userMessage.id, userMessage.threadId, userMessage.role, userMessage.content, userMessage.createdAt);
+    db.prepare('UPDATE threads SET updated_at = ? WHERE id = ?').run(now(), thread.id);
+    response.status(200).set({ 'Content-Type': 'text/event-stream; charset=utf-8', 'Cache-Control': 'no-cache, no-transform', Connection: 'keep-alive' });
+    response.flushHeaders();
+    const send = payload => response.write(`data: ${JSON.stringify(payload)}\n\n`);
+    send({ type: 'message', message: userMessage });
+    try {
+      send({ type: 'start' });
+      const result = await streamReply(getThread(thread.id), prompt, delta => send({ type: 'delta', delta }), { onStatus: message => send({ type: 'status', message }), onSources: sources => send({ type: 'sources', sources }) });
+      const content = result.sources.length ? `${result.answer}${sourceMarkdown(result.sources)}` : result.answer;
+      const assistantMessage = makeMessage(thread.id, 'assistant', content);
+      db.prepare('INSERT INTO messages VALUES (?, ?, ?, ?, ?)').run(assistantMessage.id, assistantMessage.threadId, assistantMessage.role, assistantMessage.content, assistantMessage.createdAt);
+      db.prepare('UPDATE threads SET updated_at = ? WHERE id = ?').run(now(), thread.id);
+      send({ type: 'done', message: assistantMessage });
+    } catch (error) {
+      send({ type: 'error', error: error.message || 'Unable to create a response' });
+    }
+    response.end();
+  });
   app.use(express.static(path.join(ROOT, 'dist'), { index: 'index.html', etag: false }));
   app.use((error, _, response, __) => { console.error(error); response.status(400).json({ error: error.message || 'Request failed' }); });
   return app;
@@ -255,4 +454,4 @@ async function createApp() {
 if (require.main === module) {
   createApp().then(app => app.listen(API_PORT, '127.0.0.1', () => console.log(`Synapse API is running at http://127.0.0.1:${API_PORT}`))).catch(error => { console.error(error); process.exitCode = 1; });
 }
-module.exports = { createApp, buildConversation, createSeed, openDatabase };
+module.exports = { createApp, buildConversation, createSeed, openDatabase, resolveSearchRequest, searchPolicyPrompt };

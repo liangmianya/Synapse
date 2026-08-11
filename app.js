@@ -50,9 +50,16 @@ function threadPath(thread) {
   return path;
 }
 function renderCardPath(thread) {
+  if (isSynthesisThread(thread)) return `<div class="card-path"><span>${thread.messages.length ? '合流' : '合流草稿'}</span></div>`;
   const path=threadPath(thread);
   if (path.length < 2) return `<div class="card-path"><span>主线索</span></div>`;
   return `<div class="card-path">${path.map((item,index)=>`<span>${escapeHtml(item.title)}</span>${index<path.length-1 ? '<i data-lucide="chevron-right"></i>' : ''}`).join('')}</div>`;
+}
+function isSynthesisThread(thread) {
+  return Boolean(thread && (thread.title.startsWith('综合：') || state.links.some(link=>link.target===thread.id && link.type==='synthesis')));
+}
+function renderSynthesisComposer(thread) {
+  return `<form class="synthesis-compose" data-quick-reply="${thread.id}"><textarea rows="3" placeholder="输入你想怎样综合这两条线索..." aria-label="综合 ${escapeHtml(thread.title)}"></textarea><div class="synthesis-compose-actions"><button type="submit" aria-label="生成综合" title="生成综合"><i data-lucide="arrow-up"></i></button></div></form>`;
 }
 function branchPrompt(type, prompt) {
   const value=String(prompt || '').trim();
@@ -111,10 +118,7 @@ async function bootstrap(workspaceId=state.workspaceId) {
     state.selected.clear();
     await renderWorkspacePicker();
     renderAll();
-    try {
-      const settings = await (await api('/api/settings')).json();
-      $('#status-model-name').textContent = settings.provider === 'demo' ? 'Synapse Demo' : (settings.model || '已配置模型');
-    } catch { /* The workspace remains usable when settings are unavailable. */ }
+    try { await (await api('/api/settings')).json(); } catch { /* The workspace remains usable when settings are unavailable. */ }
     toast('已连接本地学习工作台');
   } catch {
     state.backendAvailable = false;
@@ -145,16 +149,18 @@ function renderCards() {
   const scrollPositions = new Map($$('.thread-card', layer).map(card => [card.dataset.card, $('.card-conversation', card)?.scrollTop || 0]));
   layer.innerHTML = state.threads.map(thread => {
     const title=escapeHtml(thread.title);
+    const synthesisDraft=isSynthesisThread(thread) && thread.messages.length === 0;
     const quickBranch = state.quickBranchTargetId === thread.id ? `<form class="quick-branch" data-quick-branch="${thread.id}">${branchTypeControls()}<textarea rows="2" placeholder="新的问题..." aria-label="从「${title}」创建分支"></textarea><div><button type="button" data-action="close-quick-branch" aria-label="取消" title="取消"><i data-lucide="x"></i></button><button type="submit" aria-label="创建分支" title="创建分支"><i data-lucide="arrow-up"></i></button></div></form>` : '';
-    const quickReply = state.quickReplyTargetId === thread.id ? `<form class="quick-reply" data-quick-reply="${thread.id}"><textarea rows="2" placeholder="继续追问当前线索..." aria-label="继续追问「${title}」"></textarea><button type="button" data-action="close-quick-reply" aria-label="取消" title="取消"><i data-lucide="x"></i></button><button type="submit" aria-label="发送" title="发送"><i data-lucide="arrow-up"></i></button></form>` : '';
-    return `<article class="thread-card ${state.activeId === thread.id ? 'active' : ''} ${state.selected.has(thread.id) ? 'selected' : ''}" data-card="${thread.id}" style="left:${thread.x}px;top:${thread.y}px"><button class="branch-node" data-action="quick-branch" data-thread="${thread.id}" aria-label="从「${title}」创建分支" title="创建分支"><i data-lucide="plus"></i></button>${quickBranch}${renderCardPath(thread)}<div class="card-top"><span class="topic-dot" style="background:${thread.topic}"></span><span class="card-title">${title}</span><button class="card-select" data-select="${thread.id}" aria-label="${state.selected.has(thread.id) ? '取消选择' : '选择'} ${title}" title="${state.selected.has(thread.id) ? '取消选择' : '选择'}"><i data-lucide="${state.selected.has(thread.id) ? 'check' : 'circle'}"></i></button></div><div class="card-conversation">${thread.messages.slice(-3).map(message => formatMessage(message,true)).join('')}</div>${quickReply}<div class="thread-card-actions"><button class="card-action" data-action="open-thread" data-thread="${thread.id}"><i data-lucide="maximize-2"></i>打开</button><button class="card-action danger-action" data-action="request-delete" data-thread="${thread.id}"><i data-lucide="trash-2"></i>删除</button></div></article>`;
+    const quickReply = !synthesisDraft && state.quickReplyTargetId === thread.id ? `<form class="quick-reply" data-quick-reply="${thread.id}"><textarea rows="2" placeholder="继续追问当前线索..." aria-label="继续追问「${title}」"></textarea><button type="button" data-action="close-quick-reply" aria-label="取消" title="取消"><i data-lucide="x"></i></button><button type="submit" aria-label="发送" title="发送"><i data-lucide="arrow-up"></i></button></form>` : '';
+    const body=synthesisDraft ? renderSynthesisComposer(thread) : `<div class="card-conversation">${thread.messages.slice(-3).map(message => formatMessage(message,true)).join('')}</div>${quickReply}<div class="thread-card-actions"><button class="card-action" data-action="open-thread" data-thread="${thread.id}"><i data-lucide="maximize-2"></i>打开</button><button class="card-action danger-action" data-action="request-delete" data-thread="${thread.id}"><i data-lucide="trash-2"></i>删除</button></div>`;
+    return `<article class="thread-card ${synthesisDraft ? 'synthesis-draft' : ''} ${state.activeId === thread.id ? 'active' : ''} ${state.selected.has(thread.id) ? 'selected' : ''}" data-card="${thread.id}" style="left:${thread.x}px;top:${thread.y}px"><button class="branch-node" data-action="quick-branch" data-thread="${thread.id}" aria-label="从「${title}」创建分支" title="创建分支"><i data-lucide="plus"></i></button>${quickBranch}${renderCardPath(thread)}<div class="card-top"><span class="topic-dot" style="background:${thread.topic}"></span><span class="card-title">${title}</span><button class="card-select" data-select="${thread.id}" aria-label="${state.selected.has(thread.id) ? '取消选择' : '选择'} ${title}" title="${state.selected.has(thread.id) ? '取消选择' : '选择'}"><i data-lucide="${state.selected.has(thread.id) ? 'check' : 'circle'}"></i></button></div>${body}</article>`;
   }).join('');
   $$('.thread-card', layer).forEach(card => {
     const conversation = $('.card-conversation', card);
     if (conversation && scrollPositions.has(card.dataset.card)) conversation.scrollTop = scrollPositions.get(card.dataset.card);
   });
   renderConnectors();
-  const quickInput=$('.quick-branch textarea, .quick-reply textarea');
+  const quickInput=$('.quick-branch textarea, .quick-reply textarea, .synthesis-compose textarea');
   if (quickInput) setTimeout(()=>quickInput.focus(),0);
 }
 function renderedCardBounds(thread) {
@@ -174,6 +180,16 @@ function smoothConnectorPath(fromThread, toThread) {
   const first={ x:start.x+handle, y:start.y };
   const second={ x:end.x-handle, y:end.y };
   return `M ${start.x.toFixed(1)} ${start.y.toFixed(1)} C ${first.x.toFixed(1)} ${first.y.toFixed(1)}, ${second.x.toFixed(1)} ${second.y.toFixed(1)}, ${end.x.toFixed(1)} ${end.y.toFixed(1)}`;
+}
+function pointConnectorPath(start, end) {
+  const gap=end.x-start.x;
+  const handle=Math.max(46, Math.min(180, Math.abs(gap)*.5));
+  const direction=gap >= 0 ? 1 : -1;
+  return `M ${start.x.toFixed(1)} ${start.y.toFixed(1)} C ${(start.x+handle*direction).toFixed(1)} ${start.y.toFixed(1)}, ${(end.x-handle*direction).toFixed(1)} ${end.y.toFixed(1)}, ${end.x.toFixed(1)} ${end.y.toFixed(1)}`;
+}
+function branchAnchor(thread) {
+  const bounds=renderedCardBounds(thread);
+  return { x:bounds.x+bounds.width, y:bounds.y+bounds.height/2 };
 }
 function renderConnectors() {
   const svg = $('#connectors');
@@ -216,7 +232,7 @@ function renderCompare() {
 }
 function renderBulkActions() {
   const count=state.selected.size;
-  $('#canvas-bulk-actions').innerHTML=count ? `${count>=2 ? `<button class="tool-button" data-action="synthesize-selected" aria-label="生成综合卡片" title="生成综合卡片"><i data-lucide="git-merge"></i><span>${Math.min(count,3)}</span></button>` : ''}<button class="tool-button danger-tool" data-action="request-bulk-delete" aria-label="删除已选线索" title="删除已选线索"><i data-lucide="trash-2"></i><span>${count}</span></button>` : '';
+  $('#canvas-bulk-actions').innerHTML=count ? `${count>=2 ? `<button class="bulk-action" data-action="synthesize-selected" aria-label="生成综合卡片" title="生成综合卡片"><i data-lucide="git-merge"></i>综合<small>${Math.min(count,3)}</small></button>` : ''}<button class="bulk-action danger" data-action="request-bulk-delete" aria-label="删除已选线索" title="删除已选线索"><i data-lucide="trash-2"></i>删除<small>${count}</small></button>` : '';
   const sidebarActions=$('#sidebar-bulk-actions');
   if (sidebarActions) sidebarActions.innerHTML=count ? `${count>=2 ? `<button class="icon-button small" data-action="synthesize-selected" aria-label="生成综合卡片" title="生成综合卡片"><i data-lucide="git-merge"></i></button>` : ''}<button class="icon-button small detail-delete" data-action="request-bulk-delete" aria-label="删除已选线索" title="删除已选线索"><i data-lucide="trash-2"></i></button>` : '';
 }
@@ -469,7 +485,7 @@ async function sendMessageToThread(threadId, raw) {
     const reader = response.body.getReader(); const decoder = new TextDecoder(); let buffer = '';
     while (true) {
       const {done, value:chunk} = await reader.read(); if(done) break; buffer += decoder.decode(chunk, {stream:true}); const events = buffer.split('\n\n'); buffer = events.pop();
-      events.forEach(event => { const line=event.split('\n').find(item => item.startsWith('data: ')); if(!line) return; try { const payload=JSON.parse(line.slice(6)); if(payload.type==='message') { optimistic.id=payload.message.id; } if(payload.type==='delta') { pending.streaming=false; pending.text += payload.delta; } if(payload.type==='done') { pending.id=payload.message.id; pending.text=payload.message.content; pending.streaming=false; } if(payload.type==='error') { pending.streaming=false; pending.text=`回复失败：${payload.error}`; toast(pending.text); } thread.count=thread.messages.length;thread.preview=pending.text || value;scheduleStreamingThreadRefresh(thread); } catch {} });
+      events.forEach(event => { const line=event.split('\n').find(item => item.startsWith('data: ')); if(!line) return; try { const payload=JSON.parse(line.slice(6)); if(payload.type==='message') { optimistic.id=payload.message.id; } if(payload.type==='status') { pending.streaming=false; pending.text=payload.message; } if(payload.type==='sources') { pending.streaming=false; pending.text=`已找到 ${payload.sources.length} 个来源，正在整理回答…`; } if(payload.type==='delta') { if(pending.text.startsWith('正在联网搜索')||pending.text.startsWith('已找到 ')) pending.text=''; pending.streaming=false; pending.text += payload.delta; } if(payload.type==='done') { pending.id=payload.message.id; pending.text=payload.message.content; pending.streaming=false; } if(payload.type==='error') { pending.streaming=false; pending.text=`回复失败：${payload.error}`; toast(pending.text); } thread.count=thread.messages.length;thread.preview=pending.text || value;scheduleStreamingThreadRefresh(thread); } catch {} });
     }
     thread.updated='刚刚'; renderAll();
   } catch (error) { pending.streaming=false;pending.text=`回复失败：${error.message || '无法连接后端'}`;renderAll();toast('无法连接后端'); }
@@ -506,15 +522,35 @@ async function synthesizeSelectedThreads() {
     toast('正在生成综合卡片');
   }
 }
+async function createSynthesisDraft(sourceIds) {
+  const threads=[...new Set(sourceIds)].map(getThread).filter(Boolean).slice(0,3);
+  if (threads.length < 2) { toast('至少连接两条线索'); return null; }
+  const bounds=threads.map(cardFootprint);
+  const maxX=Math.max(...bounds.map(item=>item.x+item.width));
+  const avgY=bounds.reduce((sum,item)=>sum+item.y,0)/bounds.length;
+  const title=`综合：${threads.map(thread=>thread.title).join(' / ')}`.slice(0,38);
+  const prompt=`综合 ${threads.map(thread=>`「${thread.title}」`).join(' 和 ')}`;
+  const thread=await createThread(prompt,null,false,null,'synthesis',{title,position:findOpenPosition({x:maxX+90,y:Math.max(70,avgY)}),topic:'#4f46e5'});
+  if (!thread) return null;
+  await createThreadLinks(thread.id, threads.map(item=>item.id), 'synthesis', '综合');
+  state.selected.clear();
+  state.selected.add(thread.id);
+  state.quickReplyTargetId=thread.id;
+  state.quickBranchTargetId=null;
+  renderAll();
+  toast('已创建合流草稿，输入后开始综合');
+  return thread;
+}
 function exportMarkdown() { const markdown=state.threads.map(thread=>`# ${thread.title}\n\n${thread.messages.map(m=>`## ${m.role==='user'?'你':'Synapse'}\n\n${m.text}`).join('\n\n')}`).join('\n\n---\n\n'); const blob=new Blob([markdown],{type:'text/markdown;charset=utf-8'});const url=URL.createObjectURL(blob);const a=document.createElement('a');a.href=url;a.download='synapse-算法复习.md';a.click();URL.revokeObjectURL(url);toast('已导出 Markdown'); }
 function openCommand() { $('#command-dialog').showModal(); renderCommandResults(''); setTimeout(()=>$('#command-search').focus(),50); }
-function settingsPayload() { return { provider:$('#provider-input').value, baseUrl:$('#base-url-input').value.trim(), apiKey:$('#api-key-input').value.trim(), model:$('#model-input').value.trim(), systemPrompt:$('#system-prompt-input').value.trim() }; }
+function settingsPayload() { return { provider:$('#provider-input').value, baseUrl:$('#base-url-input').value.trim(), apiKey:$('#api-key-input').value.trim(), model:$('#model-input').value.trim(), systemPrompt:$('#system-prompt-input').value.trim(), searchProvider:$('#search-provider-input').value, searchApiKey:$('#search-api-key-input').value.trim(), searchMaxResults:Number($('#search-max-results-input').value || 5) }; }
 function updateProviderFields() { const demo=$('#provider-input').value==='demo'; $('#provider-setting').classList.toggle('disabled',demo); $$('#provider-setting input').forEach(input=>input.disabled=demo); }
+function updateSearchFields() { const disabled=$('#search-provider-input').value==='off'; $('#search-provider-setting').classList.toggle('disabled',disabled); $$('#search-provider-setting input').forEach(input=>input.disabled=disabled); }
 function setSettingsStatus(message, type='default') { const status=$('#settings-status'); status.className=`settings-status ${type === 'default' ? '' : type}`; status.innerHTML=`<i data-lucide="${type === 'error' ? 'circle-alert' : type === 'success' ? 'circle-check' : 'shield-check'}"></i><span>${message}</span>`; initIcons(); }
 async function openSettings() {
   if (!state.backendAvailable) { toast('模型服务设置需要通过本地后端打开应用'); return; }
   try {
-    const response=await api('/api/settings'); const config=await response.json(); $('#provider-input').value=config.provider; $('#base-url-input').value=config.baseUrl || ''; $('#api-key-input').value=''; $('#api-key-input').placeholder=config.hasApiKey ? '已设置，留空可保持不变' : '输入后仅保存在本机后端'; $('#model-input').value=config.model || ''; $('#system-prompt-input').value=config.systemPrompt || ''; updateProviderFields(); setSettingsStatus(config.hasApiKey ? 'API Key 已保存在本机后端' : '密钥不会返回到浏览器'); $('#settings-dialog').showModal();
+    const response=await api('/api/settings'); const config=await response.json(); $('#provider-input').value=config.provider; $('#base-url-input').value=config.baseUrl || ''; $('#api-key-input').value=''; $('#api-key-input').placeholder=config.hasApiKey ? '已设置，留空可保持不变' : '输入后仅保存在本机后端'; $('#model-input').value=config.model || ''; $('#system-prompt-input').value=config.systemPrompt || ''; $('#search-provider-input').value=config.searchProvider || 'off'; $('#search-api-key-input').value=''; $('#search-api-key-input').placeholder=config.hasSearchApiKey ? '已设置，留空可保持不变' : 'Tavily API Key'; $('#search-max-results-input').value=config.searchMaxResults || 5; updateProviderFields(); updateSearchFields(); setSettingsStatus(config.hasApiKey || config.hasSearchApiKey ? '密钥已保存在本机后端' : '密钥不会返回到浏览器'); $('#settings-dialog').showModal();
   } catch (error) { toast(error.message || '无法读取模型设置'); }
 }
 function openWorkspaceDialog() { $('#workspace-title-input').value=''; $('#workspace-dialog').showModal(); setTimeout(()=>$('#workspace-title-input').focus(),50); }
@@ -545,7 +581,7 @@ function bindEvents() {
     if(action==='activate'){updateFocus(id);setMode('thread');renderAll();}
     if(action==='open-thread'){state.activeId=id;setMode('thread');renderAll();}
     if(action==='show-canvas'){setMode('canvas');}
-    if(action==='quick-branch') openQuickBranch(id||state.activeId);
+    if(action==='quick-branch'){if(suppressBranchClick){suppressBranchClick=false;event.preventDefault();return;}openQuickBranch(id||state.activeId);}
     if(action==='close-quick-branch') closeQuickBranch();
     if(action==='close-quick-reply') closeQuickReply();
     if(action==='set-branch-type') setBranchType(button.dataset.branchType);
@@ -572,8 +608,9 @@ function bindEvents() {
   $('#workspace-selector').addEventListener('change',event=>{const nextId=event.target.value;if(nextId && nextId!==state.workspaceId){state.pan={x:0,y:0};state.scale=1;void bootstrap(nextId).then(()=>setMode('canvas'));}});
   $('#delete-dialog').addEventListener('cancel',()=>{state.deleteTargetIds=[];});
   $('#provider-input').addEventListener('change',updateProviderFields);
+  $('#search-provider-input').addEventListener('change',updateSearchFields);
   $('#test-settings').addEventListener('click',async()=>{ try { setSettingsStatus('正在测试模型服务…'); const response=await api('/api/settings/test',{method:'POST',body:JSON.stringify(settingsPayload())}); const result=await response.json(); setSettingsStatus(result.message || '模型服务连接成功','success'); } catch(error) { setSettingsStatus(error.message || '模型服务连接失败','error'); } });
-  $('#settings-form').addEventListener('submit',async event=>{ event.preventDefault(); try { const response=await api('/api/settings',{method:'PUT',body:JSON.stringify(settingsPayload())}); const result=await response.json(); $('#api-key-input').value=''; $('#api-key-input').placeholder=result.hasApiKey ? '已设置，留空可保持不变' : '输入后仅保存在本机后端'; setSettingsStatus('模型服务设置已保存','success'); toast('模型服务设置已保存'); } catch(error) { setSettingsStatus(error.message || '无法保存模型设置','error'); } });
+  $('#settings-form').addEventListener('submit',async event=>{ event.preventDefault(); try { const response=await api('/api/settings',{method:'PUT',body:JSON.stringify(settingsPayload())}); const result=await response.json(); $('#api-key-input').value=''; $('#api-key-input').placeholder=result.hasApiKey ? '已设置，留空可保持不变' : '输入后仅保存在本机后端'; $('#search-api-key-input').value=''; $('#search-api-key-input').placeholder=result.hasSearchApiKey ? '已设置，留空可保持不变' : 'Tavily API Key'; updateSearchFields(); setSettingsStatus('模型与搜索设置已保存','success'); toast('模型与搜索设置已保存'); } catch(error) { setSettingsStatus(error.message || '无法保存模型设置','error'); } });
   document.addEventListener('submit',event=>{const form=event.target.closest('[data-compose]');if(!form)return;event.preventDefault();const input=$('textarea, input',form);void addMessage(form.dataset.compose,input.value);});
   $('#command-search').addEventListener('input',event=>renderCommandResults(event.target.value));
   $('#command-results').addEventListener('click',event=>{const button=event.target.closest('[data-command]');if(!button)return;$('#command-dialog').close();if(button.dataset.command==='thread'){state.activeId=button.dataset.thread;setMode('thread');renderAll();}if(button.dataset.command==='new')openNewThread();if(button.dataset.command==='compare')setMode('compare');});
@@ -601,10 +638,51 @@ function bindEvents() {
     if(event.key==='Tab'){event.preventDefault();openQuickBranch(state.activeId);return;}
     if(event.key==='Enter'){event.preventDefault();openQuickReply(state.activeId);return;}
   });
-  const viewport=$('#canvas-viewport');let panStart=null,drag=null,suppressCardActivationId=null;
-  viewport.addEventListener('pointerdown',event=>{const card=event.target.closest('[data-card]');const handle=event.target.closest('.card-top,.card-path');if(card && handle && !event.target.closest('button')){const thread=getThread(card.dataset.card);drag={id:thread.id,card,startX:event.clientX,startY:event.clientY,baseX:thread.x,baseY:thread.y,moved:false};card.setPointerCapture(event.pointerId);return;}if(card)return;if(event.target===viewport||event.target.closest('.canvas-grid')){panStart={x:event.clientX,y:event.clientY,baseX:state.pan.x,baseY:state.pan.y};viewport.classList.add('panning');}});
-  window.addEventListener('pointermove',event=>{if(drag){const deltaX=event.clientX-drag.startX;const deltaY=event.clientY-drag.startY;if(!drag.moved && (Math.abs(deltaX)>3||Math.abs(deltaY)>3))drag.moved=true;if(drag.moved){const thread=getThread(drag.id);thread.x=drag.baseX+deltaX/state.scale;thread.y=drag.baseY+deltaY/state.scale;drag.card.style.left=`${thread.x}px`;drag.card.style.top=`${thread.y}px`;refreshConnectorsForThread(thread.id);}}if(panStart){state.pan.x=panStart.baseX+event.clientX-panStart.x;state.pan.y=panStart.baseY+event.clientY-panStart.y;applyCanvasTransform();}});
-  window.addEventListener('pointerup',()=>{const movedThread=drag?.moved ? getThread(drag.id) : null;drag=null;panStart=null;viewport.classList.remove('panning');if(movedThread){suppressCardActivationId=movedThread.id;setTimeout(()=>{if(suppressCardActivationId===movedThread.id)suppressCardActivationId=null;},0);void persistThread(movedThread);}});
+  const viewport=$('#canvas-viewport');let panStart=null,drag=null,linkDrag=null,suppressCardActivationId=null,suppressBranchClick=false;
+  const clientToCanvasPoint=event=>{
+    const grid=$('#canvas-grid');
+    const bounds=grid.getBoundingClientRect();
+    const scaleX=bounds.width/grid.offsetWidth || state.scale || 1;
+    const scaleY=bounds.height/grid.offsetHeight || state.scale || 1;
+    return {x:(event.clientX-bounds.left)/scaleX,y:(event.clientY-bounds.top)/scaleY};
+  };
+  const clearLinkDropTarget=()=>{$$('.branch-node.drop-target').forEach(node=>node.classList.remove('drop-target'));};
+  const nearestSnapNode=event=>{
+    let best=null;
+    $$('.branch-node').forEach(node=>{
+      if(node.dataset.thread===linkDrag?.sourceId)return;
+      const bounds=node.getBoundingClientRect();
+      const center={x:bounds.left+bounds.width/2,y:bounds.top+bounds.height/2};
+      const distance=Math.hypot(event.clientX-center.x,event.clientY-center.y);
+      if(distance<=24 && (!best || distance<best.distance)) best={node,distance};
+    });
+    return best?.node || null;
+  };
+  const updateLinkDraft=event=>{
+    if(!linkDrag)return;
+    const source=getThread(linkDrag.sourceId); if(!source)return;
+    const hovered=nearestSnapNode(event);
+    const hoveredId=hovered?.dataset.thread;
+    clearLinkDropTarget();
+    linkDrag.targetId=hoveredId || null;
+    if(linkDrag.targetId) hovered.classList.add('drop-target');
+    const end=linkDrag.targetId ? branchAnchor(getThread(linkDrag.targetId)) : clientToCanvasPoint(event);
+    linkDrag.path.setAttribute('d',pointConnectorPath(branchAnchor(source),end));
+  };
+  const endLinkDraft=event=>{
+    if(!linkDrag)return;
+    const targetId=linkDrag.targetId;
+    const moved=linkDrag.moved;
+    linkDrag.path.remove();
+    clearLinkDropTarget();
+    const sourceId=linkDrag.sourceId;
+    linkDrag=null;
+    if(moved) { suppressBranchClick=true; setTimeout(()=>{suppressBranchClick=false;},0); }
+    if(moved && targetId && targetId!==sourceId) void createSynthesisDraft([sourceId,targetId]);
+  };
+  viewport.addEventListener('pointerdown',event=>{const node=event.target.closest('.branch-node');if(node){const source=getThread(node.dataset.thread);if(!source)return;event.preventDefault();event.stopPropagation();const path=document.createElementNS('http://www.w3.org/2000/svg','path');path.setAttribute('class','connector-draft');path.setAttribute('d',pointConnectorPath(branchAnchor(source),branchAnchor(source)));$('#connectors').append(path);linkDrag={sourceId:source.id,startX:event.clientX,startY:event.clientY,path,moved:false,targetId:null};node.setPointerCapture?.(event.pointerId);return;}const card=event.target.closest('[data-card]');const handle=event.target.closest('.card-top,.card-path');if(card && handle && !event.target.closest('button')){const thread=getThread(card.dataset.card);drag={id:thread.id,card,startX:event.clientX,startY:event.clientY,baseX:thread.x,baseY:thread.y,moved:false};card.setPointerCapture(event.pointerId);return;}if(card)return;if(event.target===viewport||event.target.closest('.canvas-grid')){panStart={x:event.clientX,y:event.clientY,baseX:state.pan.x,baseY:state.pan.y};viewport.classList.add('panning');}});
+  window.addEventListener('pointermove',event=>{if(linkDrag){const deltaX=event.clientX-linkDrag.startX;const deltaY=event.clientY-linkDrag.startY;if(!linkDrag.moved && (Math.abs(deltaX)>4||Math.abs(deltaY)>4))linkDrag.moved=true;if(linkDrag.moved)updateLinkDraft(event);return;}if(drag){const deltaX=event.clientX-drag.startX;const deltaY=event.clientY-drag.startY;if(!drag.moved && (Math.abs(deltaX)>3||Math.abs(deltaY)>3))drag.moved=true;if(drag.moved){const thread=getThread(drag.id);thread.x=drag.baseX+deltaX/state.scale;thread.y=drag.baseY+deltaY/state.scale;drag.card.style.left=`${thread.x}px`;drag.card.style.top=`${thread.y}px`;refreshConnectorsForThread(thread.id);}}if(panStart){state.pan.x=panStart.baseX+event.clientX-panStart.x;state.pan.y=panStart.baseY+event.clientY-panStart.y;applyCanvasTransform();}});
+  window.addEventListener('pointerup',event=>{if(linkDrag){endLinkDraft(event);return;}const movedThread=drag?.moved ? getThread(drag.id) : null;drag=null;panStart=null;viewport.classList.remove('panning');if(movedThread){suppressCardActivationId=movedThread.id;setTimeout(()=>{if(suppressCardActivationId===movedThread.id)suppressCardActivationId=null;},0);void persistThread(movedThread);}});
   viewport.addEventListener('wheel',event=>{if(event.target.closest('.card-conversation,.quick-branch'))return;event.preventDefault();zoomCanvas(state.scale+(event.deltaY>0?-.06:.06),event.clientX,event.clientY);},{passive:false});
   $('#sync-scroll').addEventListener('change',event=>{if(!event.target.checked)return;$$('[data-scroll-column]').forEach(column=>column.addEventListener('scroll',syncScroll));});
 }
