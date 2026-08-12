@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <meta name="theme-color" content="#fafaf9" />
     <title>Synapse | 非线性学习伴侣</title>
-    <link rel="stylesheet" href="/styles.css?v=20260811-canvas-pointer-matrix" />
+    <link rel="stylesheet" href="/styles.css?v=20260812-neutral-minimap-links" />
   </head>
   <body>
     <main class="app-shell">
@@ -27,14 +27,21 @@
       </header>
 
       <aside class="sidebar">
-        <button class="new-thread-button" data-action="new-thread"><i data-lucide="plus"></i><span>新建线索</span><kbd>Ctrl N</kbd></button>
-        <button class="new-canvas-button" data-action="new-workspace"><i data-lucide="panels-top-left"></i><span>新建画布</span></button>
-        <label class="workspace-picker"><span>当前画布</span><select id="workspace-selector" aria-label="切换画布"></select></label>
-        <nav aria-label="工作台导航">
-          <button class="nav-item active" data-action="show-canvas"><i data-lucide="layout-dashboard"></i><span>学习画布</span><span class="nav-count" id="thread-count">4</span></button>
-        </nav>
+        <div class="creation-actions">
+          <button class="new-canvas-button" data-action="new-workspace"><i data-lucide="panels-top-left"></i><span>新建画布</span></button>
+          <button class="new-thread-button" data-action="new-thread"><i data-lucide="plus"></i><span>新建线索</span><kbd>Ctrl N</kbd></button>
+        </div>
+        <div class="workspace-picker">
+          <span>当前画布</span>
+          <div class="workspace-select" id="workspace-select">
+            <button class="workspace-trigger" id="workspace-trigger" type="button" aria-haspopup="listbox" aria-expanded="false" aria-controls="workspace-menu">
+              <span class="workspace-trigger-name" id="workspace-current">加载画布中...</span><i data-lucide="chevrons-up-down"></i>
+            </button>
+            <div class="workspace-menu" id="workspace-menu" role="listbox" aria-label="切换画布" hidden></div>
+          </div>
+        </div>
         <section class="thread-tree" aria-label="线索树">
-          <div class="section-heading"><p class="nav-label">线索</p><div id="sidebar-bulk-actions"></div></div>
+          <div class="section-heading"><p class="nav-label">线索 <span class="thread-count" id="thread-count">4</span></p><div id="sidebar-bulk-actions"></div></div>
           <div id="thread-list"></div>
         </section>
       </aside>
@@ -54,6 +61,9 @@
               <div id="cards-layer"></div>
             </div>
           </div>
+          <aside class="canvas-minimap" id="canvas-minimap" aria-label="线索关系图，点击节点可定位线索">
+            <svg id="canvas-minimap-map" viewBox="0 0 180 116" preserveAspectRatio="none" aria-hidden="true"></svg>
+          </aside>
         </section>
 
         <section class="thread-view view" id="thread-view" aria-label="线索详情">
@@ -73,6 +83,7 @@
     <dialog id="command-dialog" class="command-dialog"><form method="dialog"><div class="command-input"><i data-lucide="search"></i><input id="command-search" placeholder="搜索线索" autocomplete="off" /></div><div class="command-results" id="command-results"></div></form></dialog>
     <dialog id="settings-dialog" class="settings-dialog"><form id="settings-form"><div class="dialog-head"><div><p class="eyebrow">模型与搜索</p><h2>连接 AI 服务</h2></div><button class="icon-button" type="button" data-action="close-settings" aria-label="关闭"><i data-lucide="x"></i></button></div><div class="settings-fields"><label>服务类型<select id="provider-input" name="provider"><option value="demo">Synapse 演示回复</option><option value="openai-compatible">OpenAI 兼容接口</option></select></label><div class="provider-setting" id="provider-setting"><label>接口地址<input id="base-url-input" name="baseUrl" type="url" placeholder="https://api.openai.com/v1" autocomplete="url" /></label><label>API Key<input id="api-key-input" name="apiKey" type="password" placeholder="输入后仅保存在本机后端" autocomplete="off" /></label><label>模型名称<input id="model-input" name="model" type="text" placeholder="例如：gpt-4o-mini" autocomplete="off" /></label></div><label>系统提示词<textarea id="system-prompt-input" name="systemPrompt" rows="4" placeholder="定义 AI 的角色、语言和回答风格"></textarea></label><div class="settings-divider"></div><label>搜索服务<select id="search-provider-input" name="searchProvider"><option value="off">关闭联网搜索</option><option value="tavily">Tavily</option></select></label><div class="provider-setting" id="search-provider-setting"><label>搜索 API Key<input id="search-api-key-input" name="searchApiKey" type="password" placeholder="输入后仅保存在本机后端" autocomplete="off" /></label><label>来源数量<input id="search-max-results-input" name="searchMaxResults" type="number" min="3" max="8" step="1" /></label></div><div class="settings-status" id="settings-status"><i data-lucide="shield-check"></i><span>密钥不会返回到浏览器</span></div></div><div class="dialog-actions"><button class="button secondary" id="test-settings" type="button"><i data-lucide="plug-zap"></i>测试连接</button><button class="button primary" type="submit"><i data-lucide="save"></i>保存设置</button></div></form></dialog>
     <dialog id="workspace-dialog" class="dialog"><form id="workspace-form"><div class="dialog-head"><div><p class="eyebrow">新建画布</p><h2>创建学习画布</h2></div><button class="icon-button" type="button" data-action="close-workspace" aria-label="关闭" title="关闭"><i data-lucide="x"></i></button></div><label>画布名称<input id="workspace-title-input" maxlength="80" placeholder="例如：数据结构复习" autocomplete="off" /></label><div class="dialog-actions"><button class="button secondary" type="button" data-action="close-workspace">取消</button><button class="button primary" type="submit"><i data-lucide="plus"></i>创建画布</button></div></form></dialog>
+    <dialog id="workspace-delete-dialog" class="dialog delete-dialog"><form id="workspace-delete-form"><div class="dialog-head"><div><p class="eyebrow">删除画布</p><h2 id="workspace-delete-title">删除此画布？</h2></div><button class="icon-button" type="button" data-action="close-workspace-delete" aria-label="关闭" title="关闭"><i data-lucide="x"></i></button></div><p class="dialog-copy" id="workspace-delete-copy"></p><div class="dialog-actions"><button class="button secondary" type="button" data-action="close-workspace-delete">取消</button><button class="button danger" type="submit"><i data-lucide="trash-2"></i>删除画布</button></div></form></dialog>
     <div class="toast" id="toast" role="status"></div>
     <script src="https://unpkg.com/lucide@0.468.0/dist/umd/lucide.min.js"></script>
     <script type="module" src="/app.js"></script>

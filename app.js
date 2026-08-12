@@ -4,7 +4,7 @@ import DOMPurify from 'dompurify';
 marked.use({ breaks: true, gfm: true });
 
 const state = {
-  mode: 'canvas', workspaceId: 'default', workspaceTitle: '算法复习工作台', activeId: 'quick', selected: new Set(), links: [], scale: 1, pan: { x: 0, y: 0 }, backendAvailable: false, branchTargetId: null, branchMessageId: null, quickBranchTargetId: null, quickReplyTargetId: null, branchType: null, deleteTargetIds: [],
+  mode: 'canvas', workspaceId: localStorage.getItem('synapse.active-workspace') || 'default', workspaceTitle: '算法复习工作台', activeId: 'quick', selected: new Set(), collapsedTreeIds: new Set(), links: [], scale: 1, pan: { x: 0, y: 0 }, backendAvailable: false, branchTargetId: null, branchMessageId: null, quickBranchTargetId: null, quickReplyTargetId: null, branchType: null, deleteTargetIds: [], workspaceDeleteTarget: null, workspaces: [],
   threads: [
     { id:'quick', title:'快速排序', topic:'#0d9488', model:'GPT-4o', count:6, updated:'刚刚', parent:null, x:100, y:205, pinned:true, preview:'理解分区过程，以及它为什么在平均情况下很快。', messages:[
       { role:'user', text:'解释快速排序的核心思想，并用一个数组例子说明。' },
@@ -104,10 +104,18 @@ async function api(path, options={}) {
 }
 async function bootstrap(workspaceId=state.workspaceId) {
   try {
-    const response = await api(`/api/workspaces/${workspaceId}`);
+    let response;
+    try { response = await api(`/api/workspaces/${workspaceId}`); }
+    catch {
+      const workspaces=await (await api('/api/workspaces')).json();
+      const fallback=workspaces[0];
+      if (!fallback) throw new Error('没有可用画布');
+      response=await api(`/api/workspaces/${fallback.id}`);
+    }
     const payload = await response.json();
     state.workspaceId=payload.workspace.id;
     state.workspaceTitle=payload.workspace.title;
+    localStorage.setItem('synapse.active-workspace', state.workspaceId);
     state.threads = payload.threads.map(toClientThread);
     state.links = (payload.links || []).map(toClientLink);
     state.links.push(...inferredSynthesisLinks(state.threads, state.links));
@@ -128,10 +136,31 @@ async function persistThread(thread) {
   if (!state.backendAvailable) return;
   try { await api(`/api/threads/${thread.id}`, { method:'PATCH', body:JSON.stringify({ title:thread.title, pinned:thread.pinned, position:{x:thread.x,y:thread.y} }) }); } catch { toast('本地保存失败，稍后会重试'); }
 }
+function orderedTreeThreads() {
+  const byParent=new Map();
+  const knownIds=new Set(state.threads.map(thread=>thread.id));
+  state.threads.forEach(thread=>{
+    const parentId=thread.parent && knownIds.has(thread.parent) ? thread.parent : null;
+    if(!byParent.has(parentId))byParent.set(parentId,[]);
+    byParent.get(parentId).push(thread);
+  });
+  const ordered=[];const visited=new Set(),reachable=new Set();
+  const markReachable=thread=>{if(reachable.has(thread.id))return;reachable.add(thread.id);(byParent.get(thread.id)||[]).forEach(markReachable);};
+  const visit=(thread,depth)=>{
+    if(visited.has(thread.id))return;
+    visited.add(thread.id);ordered.push({thread,depth});
+    if(state.collapsedTreeIds.has(thread.id))return;
+    (byParent.get(thread.id)||[]).forEach(child=>visit(child,depth+1));
+  };
+  (byParent.get(null)||[]).forEach(thread=>{markReachable(thread);visit(thread,0);});
+  state.threads.filter(thread=>!reachable.has(thread.id)).forEach(thread=>visit(thread,0));
+  return ordered;
+}
 function renderTree() {
   const list = $('#thread-list');
   if (!list) return;
-  list.innerHTML = state.threads.map(thread => `<div class="tree-item ${state.activeId === thread.id ? 'selected' : ''}" style="${thread.parent ? 'padding-left:12px' : ''}"><button class="tree-select" data-select="${thread.id}" aria-label="${state.selected.has(thread.id) ? '取消选择' : '选择'} ${thread.title}" title="${state.selected.has(thread.id) ? '取消选择' : '选择'}"><i data-lucide="${state.selected.has(thread.id) ? 'check-circle-2' : 'circle'}"></i></button><button class="tree-main" data-action="activate" data-thread="${thread.id}"><span class="tree-dot" style="background:${thread.topic}"></span><span class="tree-title">${thread.title}</span>${thread.parent ? '<i data-lucide="git-branch"></i>' : ''}</button></div>`).join('');
+  const childCounts=new Map();state.threads.forEach(thread=>{if(thread.parent)childCounts.set(thread.parent,(childCounts.get(thread.parent)||0)+1);});
+  list.innerHTML = orderedTreeThreads().map(({thread,depth})=>{const hasChildren=Boolean(childCounts.get(thread.id));const collapsed=state.collapsedTreeIds.has(thread.id);const disclosure=hasChildren ? `<button class="tree-disclosure" data-action="toggle-tree" data-thread="${thread.id}" aria-label="${collapsed ? '展开' : '收起'} ${escapeHtml(thread.title)}" title="${collapsed ? '展开' : '收起'}"><i data-lucide="${collapsed ? 'chevron-right' : 'chevron-down'}"></i></button>` : '<span class="tree-disclosure-placeholder" aria-hidden="true"></span>';return `<div class="tree-item ${state.activeId === thread.id ? 'selected' : ''}" role="treeitem" aria-level="${depth+1}" ${hasChildren ? `aria-expanded="${!collapsed}"` : ''} style="--tree-indent:${depth*18}px">${disclosure}<button class="tree-select" data-select="${thread.id}" aria-label="${state.selected.has(thread.id) ? '取消选择' : '选择'} ${escapeHtml(thread.title)}" title="${state.selected.has(thread.id) ? '取消选择' : '选择'}"><i data-lucide="${state.selected.has(thread.id) ? 'check-circle-2' : 'circle'}"></i></button><button class="tree-main" data-action="activate" data-thread="${thread.id}"><span class="tree-dot" style="background:${thread.topic}"></span><span class="tree-title">${escapeHtml(thread.title)}</span>${thread.parent ? '<i data-lucide="git-branch"></i>' : ''}</button></div>`;}).join('');
   const count = $('#thread-count');
   if (count) count.textContent = state.threads.length;
 }
@@ -139,9 +168,9 @@ async function renderWorkspacePicker() {
   if (!state.backendAvailable) return;
   try {
     const response=await api('/api/workspaces');
-    const workspaces=await response.json();
-    $('#workspace-selector').innerHTML=workspaces.map(workspace=>`<option value="${workspace.id}">${workspace.title}</option>`).join('');
-    $('#workspace-selector').value=state.workspaceId;
+    state.workspaces=await response.json();
+    $('#workspace-current').textContent=state.workspaceTitle;
+    $('#workspace-menu').innerHTML=`<div class="workspace-options">${state.workspaces.map(workspace=>`<button class="workspace-option ${workspace.id===state.workspaceId ? 'active' : ''}" type="button" role="option" aria-selected="${workspace.id===state.workspaceId}" data-action="select-workspace" data-workspace="${workspace.id}"><i data-lucide="${workspace.id===state.workspaceId ? 'check' : 'panels-top-left'}"></i><span>${escapeHtml(workspace.title)}</span></button>`).join('')}</div><div class="workspace-menu-divider"></div><button class="workspace-menu-action danger" type="button" data-action="request-workspace-delete" ${state.workspaces.length <= 1 ? 'disabled title="至少保留一个画布"' : ''}><i data-lucide="trash-2"></i><span>删除当前画布</span></button>`;
   } catch { /* Workspace switching remains optional when the list is unavailable. */ }
 }
 function renderCards() {
@@ -152,7 +181,9 @@ function renderCards() {
     const synthesisDraft=isSynthesisThread(thread) && thread.messages.length === 0;
     const quickBranch = state.quickBranchTargetId === thread.id ? `<form class="quick-branch" data-quick-branch="${thread.id}">${branchTypeControls()}<textarea rows="2" placeholder="新的问题..." aria-label="从「${title}」创建分支"></textarea><div><button type="button" data-action="close-quick-branch" aria-label="取消" title="取消"><i data-lucide="x"></i></button><button type="submit" aria-label="创建分支" title="创建分支"><i data-lucide="arrow-up"></i></button></div></form>` : '';
     const quickReply = !synthesisDraft && state.quickReplyTargetId === thread.id ? `<form class="quick-reply" data-quick-reply="${thread.id}"><textarea rows="2" placeholder="继续追问当前线索..." aria-label="继续追问「${title}」"></textarea><button type="button" data-action="close-quick-reply" aria-label="取消" title="取消"><i data-lucide="x"></i></button><button type="submit" aria-label="发送" title="发送"><i data-lucide="arrow-up"></i></button></form>` : '';
-    const body=synthesisDraft ? renderSynthesisComposer(thread) : `<div class="card-conversation">${thread.messages.slice(-3).map(message => formatMessage(message,true)).join('')}</div>${quickReply}<div class="thread-card-actions"><button class="card-action" data-action="open-thread" data-thread="${thread.id}"><i data-lucide="maximize-2"></i>打开</button><button class="card-action danger-action" data-action="request-delete" data-thread="${thread.id}"><i data-lucide="trash-2"></i>删除</button></div>`;
+    const cardActions=synthesisDraft ? '' : `<div class="thread-card-actions"><button class="card-action icon-only" data-action="open-thread" data-thread="${thread.id}" aria-label="打开线索" title="打开线索"><i data-lucide="maximize-2"></i></button><button class="card-action icon-only danger-action" data-action="request-delete" data-thread="${thread.id}" aria-label="删除线索" title="删除线索"><i data-lucide="trash-2"></i></button></div>`;
+    const compactMessages=thread.messages.filter(message=>message.role!=='user').slice(-2);
+    const body=synthesisDraft ? renderSynthesisComposer(thread) : `<div class="card-conversation">${compactMessages.map(message => formatMessage(message,true)).join('')}</div>${quickReply}${cardActions}`;
     return `<article class="thread-card ${synthesisDraft ? 'synthesis-draft' : ''} ${state.activeId === thread.id ? 'active' : ''} ${state.selected.has(thread.id) ? 'selected' : ''}" data-card="${thread.id}" style="left:${thread.x}px;top:${thread.y}px"><button class="branch-node" data-action="quick-branch" data-thread="${thread.id}" aria-label="从「${title}」创建分支" title="创建分支"><i data-lucide="plus"></i></button>${quickBranch}${renderCardPath(thread)}<div class="card-top"><span class="topic-dot" style="background:${thread.topic}"></span><span class="card-title">${title}</span><button class="card-select" data-select="${thread.id}" aria-label="${state.selected.has(thread.id) ? '取消选择' : '选择'} ${title}" title="${state.selected.has(thread.id) ? '取消选择' : '选择'}"><i data-lucide="${state.selected.has(thread.id) ? 'check' : 'circle'}"></i></button></div>${body}</article>`;
   }).join('');
   $$('.thread-card', layer).forEach(card => {
@@ -236,7 +267,24 @@ function renderBulkActions() {
   const sidebarActions=$('#sidebar-bulk-actions');
   if (sidebarActions) sidebarActions.innerHTML=count ? `${count>=2 ? `<button class="icon-button small" data-action="synthesize-selected" aria-label="生成综合卡片" title="生成综合卡片"><i data-lucide="git-merge"></i></button>` : ''}<button class="icon-button small detail-delete" data-action="request-bulk-delete" aria-label="删除已选线索" title="删除已选线索"><i data-lucide="trash-2"></i></button>` : '';
 }
-function renderAll() { renderTree(); renderCards(); renderDetail(); renderCompare(); renderBulkActions(); initIcons(); applyCanvasTransform(); }
+function renderMinimap() {
+  const map=$('#canvas-minimap-map');if(!map)return;
+  const width=180,height=116,padding=8,cardWidth=400,cardHeight=340;
+  if(!state.threads.length){map.innerHTML='';return;}
+  const minX=Math.min(...state.threads.map(thread=>thread.x)),minY=Math.min(...state.threads.map(thread=>thread.y));
+  const maxX=Math.max(...state.threads.map(thread=>thread.x+cardWidth)),maxY=Math.max(...state.threads.map(thread=>thread.y+cardHeight));
+  const scale=Math.min((width-padding*2)/Math.max(cardWidth,maxX-minX),(height-padding*2)/Math.max(cardHeight,maxY-minY));
+  const offsetX=(width-(maxX-minX)*scale)/2-minX*scale,offsetY=(height-(maxY-minY)*scale)/2-minY*scale;
+  const rectFor=thread=>{const size=Math.max(10,Math.min(16,Math.max(cardWidth,cardHeight)*scale*.72));const x=offsetX+(thread.x+cardWidth/2)*scale-size/2;const y=offsetY+(thread.y+cardHeight/2)*scale-size/2;return{x,y,width:size,height:size};};
+  const center=thread=>{const rect=rectFor(thread);return{x:rect.x+rect.width/2,y:rect.y+rect.height/2};};
+  const branchLinks=state.threads.filter(thread=>thread.parent&&getThread(thread.parent)).map(thread=>{const source=center(getThread(thread.parent)),target=center(thread);return `<line class="minimap-link" x1="${source.x}" y1="${source.y}" x2="${target.x}" y2="${target.y}"/>`;}).join('');
+  const mergeLinks=state.links.filter(link=>link.type==='synthesis'&&getThread(link.source)&&getThread(link.target)).map(link=>{const source=center(getThread(link.source)),target=center(getThread(link.target));return `<line class="minimap-merge-link" x1="${source.x}" y1="${source.y}" x2="${target.x}" y2="${target.y}"/>`;}).join('');
+  const mergeTargets=new Set(state.links.filter(link=>link.type==='synthesis').map(link=>link.target));
+  const cards=state.threads.map(thread=>{const rect=rectFor(thread);const active=thread.id===state.activeId;const merge=mergeTargets.has(thread.id);return `<rect class="minimap-card-hit" data-minimap-thread="${thread.id}" x="${rect.x-2}" y="${rect.y-2}" width="${rect.width+4}" height="${rect.height+4}" rx="2"/><rect class="minimap-card ${merge?'merge':''} ${active?'active':''}" data-minimap-thread="${thread.id}" x="${rect.x}" y="${rect.y}" width="${rect.width}" height="${rect.height}" rx="1.8"/>`;}).join('');
+  map.innerHTML=`${branchLinks}${mergeLinks}${cards}`;
+}
+function scheduleMinimapRender() { if(scheduleMinimapRender.queued)return;scheduleMinimapRender.queued=true;requestAnimationFrame(()=>{scheduleMinimapRender.queued=false;renderMinimap();}); }
+function renderAll() { renderTree(); renderCards(); renderDetail(); renderCompare(); renderBulkActions(); renderMinimap(); initIcons(); applyCanvasTransform(); }
 function renderActiveState() {
   $$('.thread-card').forEach(card => card.classList.toggle('active', card.dataset.card === state.activeId));
   $$('#thread-list .tree-item').forEach(item => {
@@ -245,6 +293,7 @@ function renderActiveState() {
   });
   $$('[data-connector-thread]').forEach(path => path.classList.toggle('active', path.dataset.connectorThread === state.activeId));
   $$('[data-link]').forEach(path => path.classList.toggle('active', path.dataset.linkSource === state.activeId || path.dataset.linkTarget === state.activeId));
+  renderMinimap();
   if (state.mode === 'thread') { renderDetail(); initIcons(); }
 }
 function applyCanvasTransform() {
@@ -555,6 +604,36 @@ async function openSettings() {
 }
 function openWorkspaceDialog() { $('#workspace-title-input').value=''; $('#workspace-dialog').showModal(); setTimeout(()=>$('#workspace-title-input').focus(),50); }
 function closeWorkspaceDialog() { $('#workspace-dialog').close(); }
+function setWorkspaceMenu(open) { const menu=$('#workspace-menu'); const trigger=$('#workspace-trigger'); menu.hidden=!open; trigger.setAttribute('aria-expanded',String(open)); }
+async function selectWorkspace(workspaceId) {
+  if (!workspaceId || workspaceId===state.workspaceId) { setWorkspaceMenu(false); return; }
+  setWorkspaceMenu(false);
+  state.pan={x:0,y:0}; state.scale=1; state.selected.clear();
+  await bootstrap(workspaceId);
+  setMode('canvas');
+}
+function requestWorkspaceDelete() {
+  if (state.workspaces.length <= 1) { toast('至少保留一个画布'); return; }
+  state.workspaceDeleteTarget=state.workspaceId;
+  $('#workspace-delete-title').textContent=`删除「${state.workspaceTitle}」？`;
+  $('#workspace-delete-copy').textContent='这会永久删除此画布内的全部线索、对话和连接，且无法撤销。';
+  setWorkspaceMenu(false);
+  $('#workspace-delete-dialog').showModal();
+}
+function closeWorkspaceDeleteDialog() { state.workspaceDeleteTarget=null; $('#workspace-delete-dialog').close(); }
+async function deleteWorkspace() {
+  const workspaceId=state.workspaceDeleteTarget;
+  if (!workspaceId) return;
+  try {
+    const response=await api(`/api/workspaces/${workspaceId}`, { method:'DELETE' });
+    const result=await response.json();
+    localStorage.setItem('synapse.active-workspace',result.nextWorkspaceId);
+    state.pan={x:0,y:0}; state.scale=1; state.selected.clear();
+    await bootstrap(result.nextWorkspaceId);
+    setMode('canvas');
+    toast('画布已删除');
+  } catch(error) { toast(error.message || '删除画布失败'); }
+}
 async function createWorkspace(title) {
   if (!state.backendAvailable) { toast('新建画布需要连接本地后端'); return; }
   try {
@@ -578,6 +657,11 @@ function bindEvents() {
     if(action==='new-thread') openNewThread();
     if(action==='new-workspace') openWorkspaceDialog();
     if(action==='close-workspace') closeWorkspaceDialog();
+    if(action==='toggle-workspace-menu') setWorkspaceMenu($('#workspace-menu').hidden);
+    if(action==='select-workspace') void selectWorkspace(button.dataset.workspace);
+    if(action==='request-workspace-delete') requestWorkspaceDelete();
+    if(action==='close-workspace-delete') closeWorkspaceDeleteDialog();
+    if(action==='toggle-tree'){const threadId=id;if(state.collapsedTreeIds.has(threadId))state.collapsedTreeIds.delete(threadId);else state.collapsedTreeIds.add(threadId);renderTree();initIcons();return;}
     if(action==='activate'){updateFocus(id);setMode('thread');renderAll();}
     if(action==='open-thread'){state.activeId=id;setMode('thread');renderAll();}
     if(action==='show-canvas'){setMode('canvas');}
@@ -605,7 +689,9 @@ function bindEvents() {
   $('#branch-form').addEventListener('submit',async event=>{event.preventDefault();const value=$('#branch-prompt').value.trim();if(!value){$('#branch-prompt').focus();return;}const parent=state.branchTargetId;const prompt=parent ? branchPrompt(activeBranchType(),value) : value;const create=$('#create-branch');create.disabled=true;try{const created=await createThread(prompt,parent,true,state.branchMessageId);if(created)closeBranchDialog();}finally{create.disabled=false;}});
   $('#delete-form').addEventListener('submit',async event=>{event.preventDefault();const targets=state.deleteTargetIds;if(!targets.length)return;const submit=$('#delete-form button[type="submit"]');submit.disabled=true;try{await deleteThreads(targets);closeDeleteDialog();}finally{submit.disabled=false;}});
   $('#workspace-form').addEventListener('submit',event=>{event.preventDefault();const title=$('#workspace-title-input').value.trim() || '未命名画布';void createWorkspace(title);});
-  $('#workspace-selector').addEventListener('change',event=>{const nextId=event.target.value;if(nextId && nextId!==state.workspaceId){state.pan={x:0,y:0};state.scale=1;void bootstrap(nextId).then(()=>setMode('canvas'));}});
+  $('#workspace-delete-form').addEventListener('submit',async event=>{event.preventDefault();const submit=$('#workspace-delete-form button[type="submit"]');submit.disabled=true;try{await deleteWorkspace();closeWorkspaceDeleteDialog();}finally{submit.disabled=false;}});
+  $('#workspace-trigger').dataset.action='toggle-workspace-menu';
+  document.addEventListener('click',event=>{if(!event.target.closest('#workspace-select'))setWorkspaceMenu(false);});
   $('#delete-dialog').addEventListener('cancel',()=>{state.deleteTargetIds=[];});
   $('#provider-input').addEventListener('change',updateProviderFields);
   $('#search-provider-input').addEventListener('change',updateSearchFields);
@@ -681,9 +767,11 @@ function bindEvents() {
     if(moved && targetId && targetId!==sourceId) void createSynthesisDraft([sourceId,targetId]);
   };
   viewport.addEventListener('pointerdown',event=>{const node=event.target.closest('.branch-node');if(node){const source=getThread(node.dataset.thread);if(!source)return;event.preventDefault();event.stopPropagation();const path=document.createElementNS('http://www.w3.org/2000/svg','path');path.setAttribute('class','connector-draft');path.setAttribute('d',pointConnectorPath(branchAnchor(source),branchAnchor(source)));$('#connectors').append(path);linkDrag={sourceId:source.id,startX:event.clientX,startY:event.clientY,path,moved:false,targetId:null};node.setPointerCapture?.(event.pointerId);return;}const card=event.target.closest('[data-card]');const handle=event.target.closest('.card-top,.card-path');if(card && handle && !event.target.closest('button')){const thread=getThread(card.dataset.card);drag={id:thread.id,card,startX:event.clientX,startY:event.clientY,baseX:thread.x,baseY:thread.y,moved:false};card.setPointerCapture(event.pointerId);return;}if(card)return;if(event.target===viewport||event.target.closest('.canvas-grid')){panStart={x:event.clientX,y:event.clientY,baseX:state.pan.x,baseY:state.pan.y};viewport.classList.add('panning');}});
-  window.addEventListener('pointermove',event=>{if(linkDrag){const deltaX=event.clientX-linkDrag.startX;const deltaY=event.clientY-linkDrag.startY;if(!linkDrag.moved && (Math.abs(deltaX)>4||Math.abs(deltaY)>4))linkDrag.moved=true;if(linkDrag.moved)updateLinkDraft(event);return;}if(drag){const deltaX=event.clientX-drag.startX;const deltaY=event.clientY-drag.startY;if(!drag.moved && (Math.abs(deltaX)>3||Math.abs(deltaY)>3))drag.moved=true;if(drag.moved){const thread=getThread(drag.id);thread.x=drag.baseX+deltaX/state.scale;thread.y=drag.baseY+deltaY/state.scale;drag.card.style.left=`${thread.x}px`;drag.card.style.top=`${thread.y}px`;refreshConnectorsForThread(thread.id);}}if(panStart){state.pan.x=panStart.baseX+event.clientX-panStart.x;state.pan.y=panStart.baseY+event.clientY-panStart.y;applyCanvasTransform();}});
+  window.addEventListener('pointermove',event=>{if(linkDrag){const deltaX=event.clientX-linkDrag.startX;const deltaY=event.clientY-linkDrag.startY;if(!linkDrag.moved && (Math.abs(deltaX)>4||Math.abs(deltaY)>4))linkDrag.moved=true;if(linkDrag.moved)updateLinkDraft(event);return;}if(drag){const deltaX=event.clientX-drag.startX;const deltaY=event.clientY-drag.startY;if(!drag.moved && (Math.abs(deltaX)>3||Math.abs(deltaY)>3))drag.moved=true;if(drag.moved){const thread=getThread(drag.id);thread.x=drag.baseX+deltaX/state.scale;thread.y=drag.baseY+deltaY/state.scale;drag.card.style.left=`${thread.x}px`;drag.card.style.top=`${thread.y}px`;refreshConnectorsForThread(thread.id);scheduleMinimapRender();}}if(panStart){state.pan.x=panStart.baseX+event.clientX-panStart.x;state.pan.y=panStart.baseY+event.clientY-panStart.y;applyCanvasTransform();}});
   window.addEventListener('pointerup',event=>{if(linkDrag){endLinkDraft(event);return;}const movedThread=drag?.moved ? getThread(drag.id) : null;drag=null;panStart=null;viewport.classList.remove('panning');if(movedThread){suppressCardActivationId=movedThread.id;setTimeout(()=>{if(suppressCardActivationId===movedThread.id)suppressCardActivationId=null;},0);void persistThread(movedThread);}});
   viewport.addEventListener('wheel',event=>{if(event.target.closest('.card-conversation,.quick-branch'))return;event.preventDefault();zoomCanvas(state.scale+(event.deltaY>0?-.06:.06),event.clientX,event.clientY);},{passive:false});
+  $('#canvas-minimap').addEventListener('pointerdown',event=>event.stopPropagation());
+  $('#canvas-minimap').addEventListener('click',event=>{const card=event.target.closest('[data-minimap-thread]');if(!card)return;const thread=getThread(card.dataset.minimapThread);if(!thread)return;state.activeId=thread.id;state.pan.x=viewport.clientWidth/2-(thread.x+200)*state.scale;state.pan.y=viewport.clientHeight/2-(thread.y+170)*state.scale;renderActiveState();applyCanvasTransform();});
   $('#sync-scroll').addEventListener('change',event=>{if(!event.target.checked)return;$$('[data-scroll-column]').forEach(column=>column.addEventListener('scroll',syncScroll));});
 }
 function syncScroll(event){if(!$('#sync-scroll').checked)return;$$('[data-scroll-column]').forEach(column=>{if(column!==event.currentTarget)column.scrollTop=event.currentTarget.scrollTop;});}

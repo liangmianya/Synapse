@@ -368,6 +368,24 @@ async function createApp() {
   app.get('/api/workspaces', (_, response) => response.json(db.prepare('SELECT id, title, created_at, updated_at FROM workspaces ORDER BY updated_at DESC').all().map(row => ({ id: row.id, title: row.title, createdAt: row.created_at, updatedAt: row.updated_at }))));
   app.post('/api/workspaces', (request, response) => { const id=randomUUID(); const createdAt=now(); const workspace={ id, title:safeWorkspaceTitle(request.body.title), createdAt, updatedAt:createdAt }; db.prepare('INSERT INTO workspaces VALUES (?, ?, ?, ?)').run(workspace.id, workspace.title, workspace.createdAt, workspace.updatedAt); response.status(201).json(workspace); });
   app.get('/api/workspaces/:id', (request, response) => { const payload = workspacePayload(request.params.id); if (!payload) return response.status(404).json({ error: 'Workspace not found' }); response.json(payload); });
+  app.delete('/api/workspaces/:id', (request, response) => {
+    const workspace=db.prepare('SELECT id FROM workspaces WHERE id = ?').get(request.params.id);
+    if (!workspace) return response.status(404).json({ error: 'Workspace not found' });
+    const count=db.prepare('SELECT COUNT(*) AS count FROM workspaces').get().count;
+    if (count <= 1) return response.status(400).json({ error: '至少保留一个画布' });
+    const threadIds=db.prepare('SELECT id FROM threads WHERE workspace_id = ?').all(workspace.id).map(row=>row.id);
+    db.transaction(() => {
+      if (threadIds.length) {
+        const placeholders=threadIds.map(() => '?').join(',');
+        db.prepare(`DELETE FROM links WHERE workspace_id = ? OR source_thread_id IN (${placeholders}) OR target_thread_id IN (${placeholders})`).run(workspace.id, ...threadIds, ...threadIds);
+        db.prepare(`DELETE FROM messages WHERE thread_id IN (${placeholders})`).run(...threadIds);
+        db.prepare(`DELETE FROM threads WHERE id IN (${placeholders})`).run(...threadIds);
+      } else db.prepare('DELETE FROM links WHERE workspace_id = ?').run(workspace.id);
+      db.prepare('DELETE FROM workspaces WHERE id = ?').run(workspace.id);
+    })();
+    const next=db.prepare('SELECT id FROM workspaces ORDER BY updated_at DESC LIMIT 1').get();
+    response.json({ deletedWorkspaceId: workspace.id, nextWorkspaceId: next.id });
+  });
   app.post('/api/links', (request, response) => {
     const target = getThread(request.body.targetThreadId);
     if (!target) return response.status(404).json({ error: 'Target thread not found' });
